@@ -121,6 +121,14 @@ to the product documentation.
 
 ---
 
+## Contributing
+
+Corrections are welcome, particularly from anyone who has run the guide and found that reality
+disagrees with it. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for commit conventions and what to
+check before opening a pull request.
+
+---
+
 ## Support
 
 This repository is reference material accompanying a published solution. It is not a supported
