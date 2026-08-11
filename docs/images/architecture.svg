@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="985" viewBox="0 0 1240 985">
+<defs>
+  <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#7f8c8d"/>
+  </marker>
+</defs>
+<rect width="1240" height="985" fill="#ffffff"/>
+<rect x="328" y="30" width="782" height="168" rx="14" ry="14" fill="none" stroke="#9aa0a6" stroke-width="1.6" stroke-dasharray="9 7"/><text x="356" y="76" font-family="Inter, Arial, Helvetica, sans-serif" font-size="26" font-weight="600" fill="#202124">Identity provider</text>
+<rect x="346" y="100" width="176" height="66" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="434.0" y="142.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#0c447c">Okta</text>
+<rect x="538" y="100" width="176" height="66" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="626.0" y="142.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#0c447c">Auth0</text>
+<rect x="730" y="100" width="176" height="66" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="818.0" y="142.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#0c447c">MS Entra</text>
+<rect x="922" y="100" width="176" height="66" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="1010.0" y="142.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#0c447c">Keycloak</text>
+<rect x="80" y="248" width="610" height="392" rx="14" ry="14" fill="none" stroke="#9aa0a6" stroke-width="1.6" stroke-dasharray="9 7"/><text x="108" y="294" font-family="Inter, Arial, Helvetica, sans-serif" font-size="26" font-weight="600" fill="#202124">Kubernetes</text>
+<rect x="102" y="330" width="234" height="74" rx="10" ry="10" fill="#eeedfe" stroke="#9d98d8" stroke-width="1.6"/><text x="219.0" y="376.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#3c3489">Agent</text>
+<rect x="102" y="420" width="234" height="74" rx="10" ry="10" fill="#eeedfe" stroke="#9d98d8" stroke-width="1.6"/><text x="219.0" y="466.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#3c3489">Agent</text>
+<rect x="102" y="510" width="234" height="74" rx="10" ry="10" fill="#eeedfe" stroke="#9d98d8" stroke-width="1.6"/><text x="219.0" y="556.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#3c3489">Agent</text>
+<rect x="404" y="368" width="250" height="192" rx="10" ry="10" fill="#e1f5ee" stroke="#7cbfa8" stroke-width="1.6"/><text x="529.0" y="458.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="29" font-weight="600" fill="#0f6e56">agentgateway</text><text x="529.0" y="490.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="23" font-weight="400" fill="#0f6e56">Solo Enterprise</text>
+<rect x="742" y="248" width="400" height="272" rx="14" ry="14" fill="none" stroke="#9aa0a6" stroke-width="1.6" stroke-dasharray="9 7"/><text x="770" y="294" font-family="Inter, Arial, Helvetica, sans-serif" font-size="26" font-weight="600" fill="#202124">LLM providers</text>
+<rect x="760" y="330" width="176" height="72" rx="10" ry="10" fill="#faece7" stroke="#d5a898" stroke-width="1.6"/><text x="848.0" y="375.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#993c1d">Anthropic</text>
+<rect x="952" y="330" width="176" height="72" rx="10" ry="10" fill="#faece7" stroke="#d5a898" stroke-width="1.6"/><text x="1040.0" y="375.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#993c1d">OpenAI</text>
+<rect x="760" y="418" width="176" height="72" rx="10" ry="10" fill="#faece7" stroke="#d5a898" stroke-width="1.6"/><text x="848.0" y="463.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#993c1d">Bedrock</text>
+<rect x="952" y="418" width="176" height="72" rx="10" ry="10" fill="#faece7" stroke="#d5a898" stroke-width="1.6"/><text x="1040.0" y="463.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="25" font-weight="600" fill="#993c1d">Gemini</text>
+<rect x="742" y="572" width="400" height="100" rx="10" ry="10" fill="#faece7" stroke="#d5a898" stroke-width="1.6"/><text x="942.0" y="616.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="27" font-weight="600" fill="#993c1d">MCP servers</text><text x="942.0" y="648.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="22" font-weight="400" fill="#993c1d">Tools and data</text>
+<rect x="102" y="682" width="234" height="96" rx="10" ry="10" fill="#eeedfe" stroke="#9d98d8" stroke-width="1.6"/><text x="219.0" y="724.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="27" font-weight="600" fill="#3c3489">Developers</text><text x="219.0" y="756.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="21" font-weight="400" fill="#3c3489">IDE, CLI, Harness</text>
+<rect x="458" y="700" width="690" height="262" rx="14" ry="14" fill="none" stroke="#9aa0a6" stroke-width="1.6" stroke-dasharray="9 7"/><text x="486" y="746" font-family="Inter, Arial, Helvetica, sans-serif" font-size="26" font-weight="600" fill="#202124">Guardrails</text>
+<rect x="476" y="774" width="320" height="72" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="636.0" y="819.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#0c447c">OpenAI moderation</text>
+<rect x="816" y="774" width="320" height="72" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="976.0" y="819.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#0c447c">Bedrock Guardrails</text>
+<rect x="476" y="862" width="320" height="72" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="636.0" y="907.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#0c447c">Google Model Armor</text>
+<rect x="816" y="862" width="320" height="72" rx="10" ry="10" fill="#e6f1fb" stroke="#8fb4d6" stroke-width="1.6"/><text x="976.0" y="907.0" text-anchor="middle" font-family="Inter, Arial, Helvetica, sans-serif" font-size="24" font-weight="600" fill="#0c447c">Microsoft Purview</text>
+<line x1="529" y1="198" x2="529" y2="360" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="340" y1="367" x2="398" y2="400" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="340" y1="457" x2="398" y2="438" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="340" y1="547" x2="398" y2="476" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="219" y1="682" x2="219" y2="590" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="340" y1="700" x2="400" y2="556" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="658" y1="430" x2="754" y2="400" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="658" y1="520" x2="748" y2="600" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+<line x1="529" y1="564" x2="529" y2="694" stroke="#7f8c8d" stroke-width="2.6" marker-end="url(#a)"/>
+</svg>
