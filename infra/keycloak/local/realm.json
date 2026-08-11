@@ -1,0 +1,118 @@
+{
+    "realm": "llm-platform",
+    "enabled": true,
+    "roles": {
+        "realm": [
+            { "name": "llm-admin", "description": "Full LLM access, no rate limits" },
+            { "name": "llm-user",  "description": "Standard LLM access, rate limited" }
+        ]
+    },
+    "clients": [
+        {
+            "clientId": "agentgateway-client",
+            "enabled": true,
+            "protocol": "openid-connect",
+            "publicClient": false,
+            "serviceAccountsEnabled": true,
+            "standardFlowEnabled": false,
+            "directAccessGrantsEnabled": true,
+            "secret": "agentgateway-client-secret",
+            "protocolMappers": [
+                {
+                    "name": "agentgateway-audience",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-audience-mapper",
+                    "consentRequired": false,
+                    "config": {
+                        "included.custom.audience": "agentgateway",
+                        "access.token.claim": "true"
+                    }
+                },
+                {
+                    "name": "groups-mapper",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-group-membership-mapper",
+                    "consentRequired": false,
+                    "config": {
+                        "claim.name": "groups",
+                        "full.path": "false",
+                        "access.token.claim": "true",
+                        "id.token.claim": "false",
+                        "userinfo.token.claim": "false"
+                    }
+                },
+                {
+                    "name": "roles-mapper",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-realm-role-mapper",
+                    "consentRequired": false,
+                    "config": {
+                        "claim.name": "roles",
+                        "multivalued": "true",
+                        "access.token.claim": "true",
+                        "id.token.claim": "false",
+                        "userinfo.token.claim": "false"
+                    }
+                },
+                {
+                    "name": "group-single-mapper",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-attribute-mapper",
+                    "config": {
+                        "user.attribute": "group",
+                        "claim.name": "group",
+                        "jsonType.label": "String",
+                        "multivalued": "false",
+                        "access.token.claim": "true",
+                        "id.token.claim": "false"
+                    }
+                }
+            ]
+        }
+    ],
+    "groups": [
+        { "name": "developers" },
+        { "name": "agents" }
+    ],
+    "users": [
+        {
+            "username": "dev-admin",
+            "enabled": true,
+            "emailVerified": true,
+            "firstName": "Dev",
+            "lastName": "Admin",
+            "email": "dev-admin@example.com",
+            "requiredActions": [],
+            "credentials": [{"type": "password", "value": "dev-admin-password", "temporary": false}],
+            "groups": ["developers"],
+            "attributes": { "group": ["developers"] },
+            "realmRoles": ["llm-admin"]
+        },
+        {
+            "username": "dev",
+            "enabled": true,
+            "emailVerified": true,
+            "firstName": "Dev",
+            "lastName": "User",
+            "email": "dev@example.com",
+            "requiredActions": [],
+            "credentials": [{"type": "password", "value": "dev-password", "temporary": false}],
+            "groups": ["developers"],
+            "attributes": { "group": ["developers"] },
+            "realmRoles": ["llm-user"]
+        },
+        {
+            "username": "agent",
+            "enabled": true,
+            "emailVerified": true,
+            "firstName": "Agent",
+            "lastName": "Service",
+            "email": "agent@example.com",
+            "requiredActions": [],
+            "credentials": [{"type": "password", "value": "agent-password", "temporary": false}],
+            "groups": ["agents"],
+            "attributes": { "group": ["agents"] },
+            "realmRoles": ["llm-user"]
+        }
+    ]
+}
