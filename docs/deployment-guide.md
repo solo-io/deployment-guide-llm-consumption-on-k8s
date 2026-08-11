@@ -3136,6 +3136,23 @@ banana
 >
 > **For anything that must be enforced, use guardrails from Step 8.** Those evaluate every request and response at the gateway and a caller cannot opt out of them. The division: **prompt enrichment shapes behaviour, guardrails enforce boundaries.** If you catch yourself writing an injected prompt that says "never" or "always", it probably belongs in a guardrail instead.
 
+Restore the real prompt before moving on. The PINEAPPLE instruction was a test probe, and leaving
+it in place appends a nonsense word to every response on this backend for the rest of the guide:
+
+```bash run id=policy-llm-prompt-enrichment-restore
+kubectl patch eagpol llm-prompt-enrichment -n agentgateway-system --type merge \
+  -p '{"spec":{"backend":{"ai":{"prompt":{"prepend":[{"role":"system","content":"You are an assistant for ACME Corp. Prefer concise answers. If asked for legal or medical advice, decline and refer the user to a qualified professional."}]}}}}}'
+
+export ALLOWED_TOKEN=$(get_token dev)
+
+curl -s http://localhost:8081/llm \
+  -H "Authorization: Bearer ${ALLOWED_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Say hello."}]}' \
+  | jq -r '.choices[0].message.content'
+```
+
+No PINEAPPLE in the response means the original policy is back.
+
 #### 17.4 Capping request fields with `transformations`
 
 Prompt enrichment shapes the conversation. Transformations shape the request. Alongside `prompt`, the AI configuration carries `transformations`, `defaults` and `overrides`, and of the three it is `transformations` that enforces.
