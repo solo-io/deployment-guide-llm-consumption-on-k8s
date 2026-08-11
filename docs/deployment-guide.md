@@ -317,7 +317,7 @@ kubectl get deployment agentgateway-proxy -n agentgateway-system
 
 `PROGRAMMED: True` confirms the control plane pushed configuration to the proxy. If it still says `False` after two minutes, check the control plane logs:
 
-```bash run id=step-1-deploy-the-agentgateway-logs-n
+```bash run id=step-1-deploy-the-agentgateway-logs-n when=manual
 kubectl logs -n agentgateway-system deployment/enterprise-agentgateway
 ```
 
@@ -608,7 +608,7 @@ How you obtain them is your business. Every verification step from here on uses 
 
 **If you are using your own IdP,** get tokens however your provider requires and export them:
 
-```bash run id=6-2-get-two-tokens-and-look-at-env
+```bash run id=6-2-get-two-tokens-and-look-at-env when=manual
 export ALLOWED_TOKEN=<a token for a caller in your allowed group>
 export DENIED_TOKEN=<a token for a caller in a different group>
 ```
@@ -1494,7 +1494,7 @@ curl -s -o /dev/null -w "request: %{http_code}\n" http://localhost:8081/llm \
 
 **If Tracing is empty,** work through it in this order rather than guessing:
 
-```bash run id=10-5-verify-spans-are-arriving-get-pods
+```bash run id=10-5-verify-spans-are-arriving-get-pods when=manual
 # Is the collector running?
 kubectl get pods -n agentgateway-system | grep telemetry-collector
 
@@ -1604,7 +1604,7 @@ The ConfigMap has to live in the same namespace as the Gateway.
 > [!WARNING]
 > **The key name is load-bearing.** The proxy mounts this ConfigMap with an explicit `items` mapping that names `catalog.json`. Recreate it with any other key and the volume cannot mount: the new pod sits in `ContainerCreating` indefinitely, the old one is never terminated, and `kubectl rollout status` hangs with no error that names the cause. If a rollout stalls after touching this ConfigMap, check the key first:
 
-```bash run id=11-2-load-it-as-a-configmap-get-configmap
+```bash run id=11-2-load-it-as-a-configmap-get-configmap when=manual
 kubectl get configmap llm-model-costs -n agentgateway-system -o jsonpath='{.data}' | jq 'keys'
 # Must be ["catalog.json"]
 ```
@@ -1736,7 +1736,7 @@ curl -sS http://localhost:15020/metrics | grep -iE "cost|catalog"
 
 If that returns nothing, check whether the catalog loaded and whether the parameters are attached before suspecting the metric:
 
-```bash run id=11-4-confirm-it-loaded-and-is-logs-deployment-agentgateway-proxy-2
+```bash run id=11-4-confirm-it-loaded-and-is-logs-deployment-agentgateway-proxy-2 when=manual
 kubectl logs deployment/agentgateway-proxy -n agentgateway-system | grep -iE "catalog|cost"
 kubectl get gateway agentgateway-proxy -n agentgateway-system -o jsonpath='{.spec.infrastructure.parametersRef}'
 ```
@@ -1819,7 +1819,7 @@ Open `http://localhost:4000/age/` and select **Cost Management**.
 >
 > If it is still missing after that, then check configuration, in this order:
 
-```bash run id=12-1-open-the-cost-dashboard-2
+```bash run id=12-1-open-the-cost-dashboard-2 when=manual
 # Did the value land in the release?
 helm get values management -n agentgateway-system
 

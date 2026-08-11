@@ -96,9 +96,12 @@ Waits and polling live in `waits.sh`, keyed to block IDs. They are deliberately 
 a reader does not need `kubectl wait` in front of them, and a wait that is missing fails loudly on
 the next command rather than passing quietly.
 
-Some blocks in the guide are runnable by a reader but must not run unattended: the deliberate
-ConfigMap break in 14.3, the mispriced catalog in 11.4, the dual-authentication policy in 13.3
-that makes a route unusable. These are excluded by ID.
+Some blocks are runnable by a reader but must not run unattended. Those carry `when=manual` in
+their info string and are skipped: diagnostics that only apply after a failure, and alternative
+branches where a different block is the one automation should take.
+
+Everything else is in the default path. There is no exclusion list — the guide says which blocks
+are conditional, so adding a diagnostic does not require a corresponding edit here.
 
 ---
 

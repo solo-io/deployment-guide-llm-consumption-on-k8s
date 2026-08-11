@@ -111,7 +111,25 @@ that", "this is the part where" — get cut in review. State the fact.
 ````
 
 Derive the ID from what the block creates rather than from its step number, so it survives
-renumbering. Output blocks, alternatives and illustrative snippets are left untagged.
+renumbering. Output blocks and illustrative snippets are left untagged.
+
+Some commands are runnable but should not run unattended. Mark those `when=manual`:
+
+````markdown
+```bash run id=11-2-load-it-as-a-configmap-get-configmap when=manual
+````
+
+Two cases need it:
+
+**Diagnostics.** Commands a reader runs only when something has already failed — "if the rollout
+stalls, check the key first". They sit next to the warning that prompts them, which is often
+before the step that creates what they inspect, so running them in order fails.
+
+**Alternatives.** Where two blocks are mutually exclusive and only one applies — using your own
+identity provider rather than the reference one. Mark the branch automation should not take.
+
+A block is in the default path unless marked, so the test is whether it makes sense to run every
+time, in document order, on a clean cluster.
 
 ---
 
