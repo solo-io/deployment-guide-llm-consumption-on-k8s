@@ -1,20 +1,49 @@
 # auto-build
 
-Builds the environment described in [`../docs/deployment-guide.md`](../docs/deployment-guide.md)
+Builds the environment described in
+[`../docs/deployment-guide-keycloak.md`](../docs/deployment-guide-keycloak.md)
 by running the guide itself.
 
-Six scripts exist:
+Seven scripts exist:
 
 | Script | What it does |
 |---|---|
-| `extract.sh` | Pulls the runnable blocks out of the guide, in document order |
-| `waits.sh` | A readiness condition per block ID, plus the lookup |
-| `session.sh` | Sourced. Puts your shell in the state the guide assumes |
+| `preflight.sh` | Checks a build can work, then asks before anything is created |
+| `lib/extract.sh` | Pulls the runnable blocks out of the guide, in document order |
+| `lib/waits.sh` | A readiness condition per block ID, plus the lookup |
+| `lib/session.sh` | Sourced. Puts your shell in the state the guide assumes |
 | `up.sh` | Builds by running the guide, then verifies |
 | `verify.sh` | Asserts that the controls are in place and enforcing |
 | `down.sh` | Removes what the guide created |
 
-`preflight.sh` is not written yet. There is no `--mock-data`: it was documented before it existed,
+## What this builds, and what it does not
+
+The automation builds the reference path, and only that: Keycloak on kind, exactly as
+`deployment-guide-keycloak.md` describes it. Every wait, every assertion and every credential check
+here is keyed to that topology.
+
+Other identity providers, other cluster types and other LLM providers are covered by the guide and
+its attachments, and they are followed by hand. Attachment A stands up the reference Keycloak for a lab
+or PoC, Attachment B covers using your own IdP, Attachment C covers other LLM providers,
+Attachment D covers collecting metrics and traces into a stack you already run, and Attachment E
+covers guardrail alternatives. None of those paths are scripted, and `verify.sh` does not assert
+against them.
+
+**A build failing against a different topology is expected, not a defect.** `up.sh` runs whatever the
+guide says against whatever cluster your context points at, so pointing it at a different one
+produces a failure that is about the difference, not about the script. That is also why
+`--guide` skips the wait-key check: the keys belong to the shipped guide.
+
+The one thing that is a defect is a failure against the reference path. That is what the guide is
+wrong about, and it is fixed in `docs/`.
+
+---
+
+The four entry points sit at `auto-build/`; the three files they share sit in `auto-build/lib/`.
+Every path is resolved from the script's own location, so `./up.sh` from `auto-build/` and
+`auto-build/up.sh` from the repo root do the same thing.
+
+There is no `--mock-data`: it was documented before it existed,
 and a flag that silently does nothing is worse than one that is missing, so it is gone until the
 traffic generator is built.
 
@@ -75,7 +104,8 @@ step says returns 503 on every request. Set it, or tag that block `when=manual`.
 ## Usage
 
 ```bash
-./up.sh                          # build, then verify
+./preflight.sh                   # check the ground, then ask
+./up.sh                          # preflight, build, then verify
 ./up.sh --no-verify              # build only
 ./up.sh --dry-run                # print the execution plan, run nothing
 ./up.sh --from <block-id>        # resume from a block
@@ -93,7 +123,7 @@ step says returns 503 on every request. Set it, or tag that block `when=manual`.
 | Exit | Meaning |
 |---|---|
 | 0 | built, and verified |
-| 2 | would not start: bad arguments, a missing guide, a credential conflict, a block that is not valid shell |
+| 2 | would not start: bad arguments, a missing guide, a credential conflict, a block that is not valid shell, a failed preflight, or you declining at its prompt |
 | 3 | built, but a control is not enforcing |
 | other | the build failed, with the failing command's own status |
 
@@ -116,9 +146,56 @@ guide expects them to exist. It does not re-run 12.2's traffic generator, which 
 
 ---
 
+## What preflight.sh checks
+
+`up.sh` runs it before the first block and refuses to start if it fails. Failing here costs a
+correction; failing halfway through a build costs a teardown. Nothing in it changes anything: no
+resource, no port-forward, no credential written anywhere. It reads, and it asks.
+
+| Check | Fails when |
+|---|---|
+| Tools | `kubectl`, `helm`, `jq`, `curl` or `docker` is not on PATH |
+| Cluster | there is no current context, or the apiserver behind it does not answer `/healthz` with `ok` |
+| Credentials | one of the three does not resolve from the environment or `.env.local`, or is set in both to different values |
+| Keycloak | discovery does not answer, or a token for `dev` does not come back |
+| Ports | 8081, 15020 or 4000 is held by something that is not a forward, or by a forward that has stopped answering |
+
+Every failure names the fix. A check that says something is wrong without saying what to do about it
+has moved the work, not done it.
+
+Two of them are deliberately stricter than the obvious version, because the obvious version passes
+while the thing it checks is broken:
+
+**A kubeconfig with a current context in it proves nothing.** The context can name a cluster that is
+gone, and every `kubectl` in the build then fails one at a time, a hundred blocks deep.
+`kubectl get --raw /healthz` asks the apiserver itself. Bounded with `--request-timeout`, and run
+with stdin closed, because a kubeconfig whose user has no credentials makes `kubectl` prompt for a
+username and then wait on stdin forever.
+
+**A well-known endpoint answers from a half-imported realm.** Keycloak serves discovery as soon as
+the realm exists, before its clients, users and mappers are there. So discovery answering is the
+first half and a token for `dev` coming back is the other. The fetch runs the guide's own
+`get_token`, which means what is checked is what the build will use.
+
+Then it shows what it would build against — the context, its apiserver, the namespace, the guide,
+the Keycloak URL and realm, and each credential's source and length, never its value — and asks.
+It asks only when stdin is a terminal and `--approve` was not passed: a pipeline has nobody to ask,
+and waiting for an answer that cannot come is how a script hangs in CI. Enter proceeds, anything
+else aborts.
+
+`down.sh` shows the same kind of confirmation before it removes anything, with the context named
+first, because the mistake worth stopping is not "did I mean to tear down" but "did I mean to tear
+down *this*".
+
+**`--approve` with `--dry-run` is an error in both.** A dry run changes nothing, so there is nothing
+to approve, and accepting the pair would teach the habit of typing `--approve` without reading what
+follows it.
+
+---
+
 ## What verify.sh asserts
 
-It sources `session.sh`, so the tokens and forwards it needs are there before
+It sources `lib/session.sh`, so the tokens and forwards it needs are there before
 anything is asserted, then checks sixteen things against a cluster that is
 already up:
 
@@ -185,11 +262,12 @@ go, so nothing to remove is a clean exit rather than an error.
 
 ## Working through the guide by hand
 
-`session.sh` is sourced, not run, and puts the current shell into the state the
+`lib/session.sh` is sourced, not run, and puts the current shell into the state the
 guide assumes:
 
 ```bash
-. ./session.sh
+. auto-build/lib/session.sh        # from the repo root
+. ./lib/session.sh                  # from auto-build/
 ```
 
 It evaluates the guide's environment setup block and the blocks that define
@@ -211,7 +289,7 @@ so and leaves it alone rather than guessing.
 Sourcing it again is safe and is the fastest way back after a rollout has taken
 your forwards down.
 
-`up.sh` sources the same file for the credential and port-forward handling
+`up.sh` sources `lib/session.sh` for the credential and port-forward handling
 rather than carrying its own copy, and `verify.sh` should source it plainly:
 that leaves it in a session it can assert against, with the same three-state
 port logic behind it.
@@ -228,17 +306,17 @@ $LIST` does not split into words, `status` is read-only, and `path` is tied to
 The other two are useful on their own:
 
 ```bash
-./extract.sh                     # the blocks as one shell script, on stdout
-./extract.sh --dry-run           # list them: number, line, ID, when, line count, first line
-./extract.sh --manifest          # the same list, tab separated, for tooling
-./extract.sh --dry-run <file>    # any markdown file, not just the guide
+./lib/extract.sh                 # the blocks as one shell script, on stdout
+./lib/extract.sh --dry-run       # list them: number, line, ID, when, line count, first line
+./lib/extract.sh --manifest      # the same list, tab separated, for tooling
+./lib/extract.sh --dry-run <f>   # any markdown file, not just the guide
 
-./waits.sh --list                # block IDs that have a wait
-./waits.sh --table               # those IDs with the condition each one runs
-./waits.sh --for <block-id>      # the condition for one ID, or nothing
+./lib/waits.sh --list            # block IDs that have a wait
+./lib/waits.sh --table           # those IDs with the condition each one runs
+./lib/waits.sh --for <block-id>  # the condition for one ID, or nothing
 ```
 
-`extract.sh` writes a script and never runs one. Piping it to a shell is not the same as `up.sh`:
+`lib/extract.sh` writes a script and never runs one. Piping it to a shell is not the same as `up.sh`:
 the stream contains the `when=manual` blocks too, and no waits.
 
 ---
@@ -255,11 +333,11 @@ EOF
 ```
 ````
 
-`extract.sh` finds those blocks and writes them out in document order, each preceded by a marker
+`lib/extract.sh` finds those blocks and writes them out in document order, each preceded by a marker
 naming the block, where it came from, and its `when` value:
 
 ```text
-# >>> backend-anthropic-claude-sonnet-backend (deployment-guide.md:364) when=auto
+# >>> backend-anthropic-claude-sonnet-backend (deployment-guide-keycloak.md:364) when=auto
 ```
 
 `up.sh` reads that stream and runs the blocks in a single shell session. Exports and helper
@@ -275,7 +353,7 @@ The guide's environment setup block runs first. Your credentials are applied aft
 and configuration come from the guide while secrets come from you. The placeholders that block sets
 are cleared rather than overwritten, so one cannot survive by being mistaken for a value.
 
-Waits and polling live in `waits.sh`, keyed to block IDs. They are deliberately not in the guide —
+Waits and polling live in `lib/waits.sh`, keyed to block IDs. They are deliberately not in the guide —
 a reader does not need `kubectl wait` in front of them, and a wait that is missing fails loudly on
 the next command rather than passing quietly. `up.sh` looks up each block's ID after the block runs
 and runs the condition if there is one. Most blocks have none, and that is not a failure.
@@ -315,7 +393,7 @@ It stops at the failing command and reports, in this shape:
 ```text
 up.sh: a guide block failed
   block:   <the block ID>
-  guide:   docs/deployment-guide.md:<the line its fence is on>
+  guide:   docs/deployment-guide-keycloak.md:<the line its fence is on>
   command: <the command that failed, not the block>
   status:  <that command's exit status>
 
@@ -338,11 +416,11 @@ A failure is a finding, not a bug in the script. The usual causes, in order of l
    nothing to kill. Blocks run under `set -e`, so the run stops. The fix is in the guide, where a
    reader is equally entitled to know the command can fail harmlessly.
 3. **A wait is missing or too short.** The command ran before its dependency was ready. Add or
-   extend the condition in `waits.sh`.
-4. **A block ID changed.** A renamed manifest leaves `waits.sh` keyed to an ID that no longer
-   exists, and that wait then silently never runs. `up.sh` does not check this yet. Until it does,
-   `comm -13 <(./extract.sh --manifest | cut -f1 | sort) <(./waits.sh --list | sort)` prints any
-   wait keyed to a block that is not in the guide.
+   extend the condition in `lib/waits.sh`.
+4. **A block ID changed.** A renamed manifest leaves `lib/waits.sh` keyed to an ID that no longer
+   exists, and that wait then never runs and says nothing about it. `up.sh` checks this at startup
+   now and refuses to begin, naming the keys: it happened twice before the check existed. Only
+   against the shipped guide, since `--guide` means the keys belong to a different document.
 
 Correcting the guide is the point. The environment is rebuilt from the corrected guide on the next
 run, and the fix lands where readers see it.

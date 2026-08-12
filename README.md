@@ -58,7 +58,7 @@ top of the guide and in the release notes.
 
 ## Getting started
 
-Read [`docs/deployment-guide.md`](docs/deployment-guide.md) from the top. It is written to be run
+Read [`docs/deployment-guide-keycloak.md`](docs/deployment-guide-keycloak.md) from the top. It is written to be run
 in order, and each step verifies before the next depends on it.
 
 If you do not already have an identity provider to test against, start with **Attachment A** in
@@ -80,7 +80,9 @@ See [`auto-build/README.md`](auto-build/README.md) for credentials, flags and ho
 
 ```
 docs/
-  deployment-guide.md      The guide. Read this first.
+  deployment-guide-keycloak.md
+                           The guide. Read this first. Keycloak on kind is the
+                           reference path it builds; the attachments branch off it.
   attachments.md           Optional branches: IdPs, other providers, observability, guardrails
   images/                  Architecture diagram and dashboard screenshots
 infra/
@@ -90,7 +92,10 @@ auto-build/
   up.sh                    Builds the environment by running the guide end to end
   verify.sh                Asserts every control is in place and enforcing
   down.sh                  Tears the environment down
-  waits.sh                 Wait and poll conditions, keyed to the guide's block IDs
+  lib/                     Shared by the four above
+    extract.sh             Pulls the runnable blocks out of the guide, in document order
+    waits.sh               Wait and poll conditions, keyed to the guide's block IDs
+    session.sh             Sourced, to put a shell in the state the guide assumes
   .env.example             Your credentials; copy to .env.local
   README.md                How to supply credentials and run it
 ```

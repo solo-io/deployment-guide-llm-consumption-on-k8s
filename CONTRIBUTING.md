@@ -9,9 +9,9 @@ found that reality disagrees with it.
 
 | Change | Where it goes |
 |---|---|
-| A command, manifest or output that is wrong | `docs/deployment-guide.md` |
+| A command, manifest or output that is wrong | `docs/deployment-guide-keycloak.md` |
 | An alternative provider, IdP or observability stack | `docs/attachments.md` |
-| A wait that is missing or too short | `auto-build/waits.sh` |
+| A wait that is missing or too short | `auto-build/lib/waits.sh` |
 | An assertion that should be checked | `auto-build/verify.sh` |
 
 **Fix the guide, not the automation.** The scripts execute the commands the guide documents, so a
