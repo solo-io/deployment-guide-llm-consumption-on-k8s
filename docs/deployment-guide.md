@@ -2796,6 +2796,21 @@ endpoint=api.anthropic.com:443   http.status=404   duration=137ms
 
 So the gateway does not validate aliases. Better than the pinned-backend behaviour of silently substituting, but a typo in a hot path costs a provider round trip per request, and the provider sees model names from your internal namespace.
 
+**Put the alias back before moving on.** Every later step, and anything you demonstrate
+afterwards, uses `acme-chat`. Leaving it on the fallback model means they quietly answer from the
+wrong one:
+
+```bash run id=policy-llm-model-aliases-restore
+kubectl patch eagpol llm-model-aliases -n agentgateway-system --type merge \
+  -p "{\"spec\":{\"backend\":{\"ai\":{\"modelAliases\":{\"acme-chat\":\"${LLM_PRIMARY_MODEL}\"}}}}}"
+
+curl -s http://localhost:8081/llm-alias \
+  -H "Authorization: Bearer ${ALLOWED_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"model":"acme-chat","messages":[{"role":"user","content":"hello"}]}' | jq -r '.model'
+```
+
+The primary model in the response means the alias is back.
+
 ### Step 16: Load balancing and failover
 
 A single model on a single provider is a single point of failure, and LLM providers have bad days. This step spreads traffic across models and fails over when one degrades.
