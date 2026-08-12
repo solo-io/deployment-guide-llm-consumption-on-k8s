@@ -1,1 +1,10 @@
+# Credentials — never commit
+.env
 .env.local
+auto-build/.env
+auto-build/.env.local
+
+# Generated while following the guide
+catalog.json
+kubeconfig
+*.kubeconfig
