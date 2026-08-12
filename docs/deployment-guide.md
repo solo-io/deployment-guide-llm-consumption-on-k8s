@@ -82,17 +82,17 @@ export GATEWAY_API_VERSION=v1.6.1
 export KEYCLOAK_VERSION=26.1.3
 
 # Solo Enterprise license. Contact your Solo account team if you do not have one.
-export AGENTGATEWAY_LICENSE_KEY=<your-license-key>
+export AGENTGATEWAY_LICENSE_KEY='<your-license-key>'
 
 # LLM provider. This guide uses Anthropic as the reference provider.
-export ANTHROPIC_API_KEY=<your-anthropic-api-key>
+export ANTHROPIC_API_KEY='<your-anthropic-api-key>'
 export LLM_PRIMARY_MODEL=claude-sonnet-4-6
 export LLM_FALLBACK_MODEL=claude-haiku-4-5
 
 # Content moderation provider, for the second guardrail layer in Step 8.
 # Only needed if you use OpenAI Moderation. The regex layer needs no credentials,
 # and Attachment E covers Bedrock Guardrails, Model Armor, Purview DLP and webhooks.
-export OPENAI_API_KEY=<your-openai-api-key>
+export OPENAI_API_KEY='<your-openai-api-key>'
 
 # Identity provider. Keycloak is the reference implementation.
 # See Attachment A if you need to stand one up.
@@ -609,8 +609,8 @@ How you obtain them is your business. Every verification step from here on uses 
 **If you are using your own IdP,** get tokens however your provider requires and export them:
 
 ```bash run id=6-2-get-two-tokens-and-look-at-env when=manual
-export ALLOWED_TOKEN=<a token for a caller in your allowed group>
-export DENIED_TOKEN=<a token for a caller in a different group>
+export ALLOWED_TOKEN='<a token for a caller in your allowed group>'
+export DENIED_TOKEN='<a token for a caller in a different group>'
 ```
 
 **If you are using the reference Keycloak from Attachment A,** this helper fetches them. It is specific to a Keycloak realm using the password grant, so treat it as lab convenience rather than something to carry into production:
@@ -1870,7 +1870,7 @@ send_traffic "${ADMIN_TOKEN}" dev-admin 5
 With your own IdP, export a token for any second caller in your allowed group:
 
 ```bash run id=12-2-generate-traffic-worth-env-2
-export SECOND_TOKEN=<token for another caller in your allowed group>
+export SECOND_TOKEN='<token for another caller in your allowed group>'
 send_traffic "${SECOND_TOKEN}" second-caller 5
 ```
 
