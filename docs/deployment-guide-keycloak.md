@@ -428,7 +428,17 @@ kubectl get enterpriseagentgatewaybackend anthropic-claude-sonnet-backend -n age
 kubectl get httproute anthropic-claude-sonnet -n agentgateway-system
 ```
 
-The HTTPRoute status should show `Accepted` and `Programmed`. `InvalidBackendRef` means the backend name or namespace in `backendRefs` does not match an existing resource.
+The backend prints `ACCEPTED: True`. The route prints no conditions at all: `kubectl get httproute` shows name, hostnames and age, because a route's conditions are recorded against each parent Gateway rather than on the route itself. Read them with:
+
+`kubectl get httproute anthropic-claude-sonnet -n agentgateway-system -o jsonpath='{range .status.parents[*]}{range .conditions[*]}{.type}={.status} {end}{end}'`
+
+**Verified on v2026.7.1:**
+
+```text
+Accepted=True ResolvedRefs=True
+```
+
+`ResolvedRefs=False` is the one worth knowing: the backend name or namespace in `backendRefs` does not match an existing resource, and the route still reports `Accepted`. A route has no `Programmed` condition. That one belongs to the Gateway, and Step 1 is where you read it.
 
 ### Step 4: Install the Solo UI
 
