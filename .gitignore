@@ -6,5 +6,6 @@ auto-build/.env.local
 
 # Generated while following the guide
 catalog.json
+agentgateway-values.yaml
 kubeconfig
 *.kubeconfig
