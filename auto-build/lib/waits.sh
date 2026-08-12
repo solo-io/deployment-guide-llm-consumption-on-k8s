@@ -9,7 +9,7 @@
 #
 # Sourced, not executed, by a runner:
 #
-#     . ./waits.sh
+#     . ./lib/waits.sh
 #     cmd=$(wait_for "$id") && [ -n "$cmd" ] && eval "$cmd"
 #
 # The returned string is expanded by the caller, so the helper functions below
@@ -72,7 +72,11 @@ helm-management                                     wait_deployments_available
 step-4-install-the-solo-ui                          wait_port 4000
 step-5-verify-end-to-end-routing                    wait_port 8081
 
+backend-anthropic-claude-sonnet-backend             wait_backend_accepted anthropic-claude-sonnet-backend
+route-anthropic-claude-sonnet                       wait_route_accepted anthropic-claude-sonnet
+
 # --- Secure
+backend-keycloak                                    wait_backend_accepted keycloak
 policy-llm-jwt-auth                                 wait_policy_attached llm-jwt-auth
 policy-llm-authz                                    wait_policy_attached llm-authz
 policy-llm-guardrails                               wait_policy_attached llm-guardrails
@@ -87,43 +91,46 @@ policy-llm-frontend-telemetry                       wait_policy_attached llm-fro
 12-1-open-the-cost-dashboard                        wait_port 4000
 
 # --- Control
+route-anthropic-claude-sonnet-svc                   wait_route_accepted anthropic-claude-sonnet-svc
 policy-llm-svc-apikey-auth                          wait_policy_attached llm-svc-apikey-auth
-policy-llm-svc-apikey-auth-2                        wait_policy_attached llm-svc-apikey-auth
 policy-llm-gateway-jwt-auth                         wait_policy_attached llm-gateway-jwt-auth
 policy-llm-svc-jwt-permissive                       wait_policy_attached llm-svc-jwt-permissive
 policy-llm-budget-enforcement                       wait_policy_attached llm-budget-enforcement
 budget-llm-budgets                                  wait_budget_enforced llm-budgets && wait_exists ratelimitconfig agw-budget-llm-budgets-
 budget-llm-budget-demo                              wait_budget_enforced llm-budget-demo && wait_exists ratelimitconfig agw-budget-llm-budget-demo-
 budget-llm-budgets-2                                wait_budget_enforced llm-budgets
+backend-anthropic-passthrough-backend               wait_backend_accepted anthropic-passthrough-backend
+route-anthropic-alias                               wait_route_accepted anthropic-alias
 policy-llm-model-aliases                            wait_policy_attached llm-model-aliases
+backend-llm-failover-backend                        wait_backend_accepted llm-failover-backend && wait_route_accepted llm-failover
 policy-llm-failover-health                          wait_policy_attached llm-failover-health
 policy-llm-failover-health-2                        wait_policy_attached llm-failover-health
 policy-llm-failover-model-headers                   wait_policy_attached llm-failover-model-headers
 policy-llm-prompt-enrichment                        wait_policy_attached llm-prompt-enrichment
 policy-llm-token-ceiling                            wait_policy_attached llm-token-ceiling
 
-# --- Deferred, with the reason. These need one pass against a live cluster to
-# --- settle, and a guessed condition here would time out rather than fail
-# --- loudly, so they are left commented.
+# --- Read from the cluster on v2026.7.1, rather than reasoned about. What the
+# --- four deferred entries turned out to be:
 #
-# route-anthropic-claude-sonnet                     HTTPRoute conditions live under .status.parents[].conditions,
-# route-anthropic-claude-sonnet-svc                 so kubectl wait cannot read them, and the guide captures no
-# route-anthropic-alias                             HTTPRoute status to key a jsonpath poll to. Step 3 says the
-# backend-llm-failover-backend                      status shows `Accepted` and `Programmed`, but `Programmed` is a
-#                                                   Gateway condition in the Gateway API, not a route one, so the
-#                                                   wording is not something to build a condition from.
-#                                                   `backend-llm-failover-backend` also creates HTTPRoute llm-failover.
+#   HTTPRoute and EnterpriseAgentgatewayBackend are keyed above now. The routes
+#   need a filtered jsonpath because their conditions are per parent; the
+#   backends do not, because theirs are at .status.conditions where kubectl wait
+#   reads. Step 3 says a route's status shows `Accepted` and `Programmed`; the
+#   live status carries `Accepted` and `ResolvedRefs`, and no `Programmed`. The
+#   guide is wrong about that word, and ResolvedRefs is the useful one anyway.
 #
-# backend-anthropic-claude-sonnet-backend           No EnterpriseAgentgatewayBackend status is captured anywhere in
-# backend-keycloak                                  the guide, so there is no condition to name. Step 3 reads the
-# backend-anthropic-passthrough-backend             backend back with `kubectl get`, which shows a printer column
-#                                                   whose backing condition I cannot confirm without a cluster.
+#   eagpol and eagbud condition paths are confirmed, and the policy wait no
+#   longer greps a reason string for it. Both are noted at their helpers.
 #
-# enterpriseagentgatewayparameters-llm-cost-params  Block 11.4 reads the controller-generated ConfigMap
-#                                                   agentgateway-proxy-model-catalog. Whether the controller creates
-#                                                   it on Gateway creation or on parametersRef decides which block
-#                                                   the wait belongs to, and 11.4 does not say. The block that
-#                                                   follows this one already waits for the rollout it triggers.
+#   enterpriseagentgatewayparameters-llm-cost-params gets no entry, and the
+#   reason changed rather than persisting. The ConfigMap that block's step reads,
+#   agentgateway-proxy-model-catalog, is not created by it: the controller
+#   creates it with the Gateway, owned by the Gateway, at the same timestamp, a
+#   minute before the parameters resource exists. So there is nothing here to
+#   wait for that the Gateway's own wait has not already covered. The roll that
+#   the patch does trigger is waited on by the guide's own next block.
+#
+# --- Still not keyable, and the reason is unchanged:
 #
 # 15-3-verify-and-demonstrate-patch-eagpol          All three patch a policy that is already attached, so a wait on
 # 17-2-verify-with-something-patch-eagpol           `Attached` passes instantly whether or not the patch landed. A
@@ -259,22 +266,58 @@ wait_rollout() {
   kubectl rollout status "deployment/$name" -n "$WAITS_NS" --timeout="${WAITS_TIMEOUT}s"
 }
 
-# Policy conditions are reported against an ancestor, so kubectl wait cannot
-# read them. The jsonpath is the one Step 17's verification block uses, which
-# returned `Valid Attached` on a healthy policy.
+# Policy conditions are reported per ancestor, at .status.ancestors[].conditions,
+# so `kubectl wait --for=condition=` cannot see them: it reads .status.conditions
+# and nothing else. It does accept a filtered jsonpath, which is what this uses.
 #
-# grep -w, not a bare grep: a reason of NotAttached contains the string
-# Attached, and a wait that is satisfied by the failure it is checking for is
-# worse than no wait.
+# Read from a live policy on v2026.7.1:
+#   type Attached, status True, reason Attached, message "Attached to all targets"
+#
+# Keyed on the type and its status, not on the reason. An earlier version of this
+# grepped the reason string, which is prose that can change between patch
+# releases, and `grep Attached` also matches NotAttached.
 wait_policy_attached() {
   local name=${1:?usage: wait_policy_attached <policy>}
-  _poll "eagpol/$name to attach" "$WAITS_TIMEOUT" \
-    "kubectl get eagpol '$name' -n '$WAITS_NS' -o jsonpath='{.status.ancestors[*].conditions[*].reason}' | grep -qw Attached"
+  kubectl wait \
+    --for=jsonpath='{.status.ancestors[*].conditions[?(@.type=="Attached")].status}'=True \
+    --timeout="${WAITS_TIMEOUT}s" "eagpol/$name" -n "$WAITS_NS"
 }
 
-# Budget conditions are at .status.conditions, so kubectl wait works. Enforced
-# rather than Accepted on purpose: Step 14.3 is about the gap between the two,
-# where a budget is valid, compiled, and failing open.
+# HTTPRoute conditions are also per parent, at .status.parents[].conditions, for
+# the same reason and with the same workaround.
+#
+# Read from a live route on v2026.7.1: types Accepted and ResolvedRefs, both
+# status True. There is no Programmed condition on a route, whatever Step 3 says
+# about the status showing one: Programmed belongs to the Gateway.
+#
+# Both conditions, not only Accepted. A route whose backendRef does not resolve
+# is Accepted and useless, and that is the InvalidBackendRef case Step 3 warns
+# about, so it is the one worth waiting on.
+wait_route_accepted() {
+  local name=${1:?usage: wait_route_accepted <route>}
+  kubectl wait \
+    --for=jsonpath='{.status.parents[*].conditions[?(@.type=="Accepted")].status}'=True \
+    --timeout="${WAITS_TIMEOUT}s" "httproute/$name" -n "$WAITS_NS" &&
+  kubectl wait \
+    --for=jsonpath='{.status.parents[*].conditions[?(@.type=="ResolvedRefs")].status}'=True \
+    --timeout="${WAITS_TIMEOUT}s" "httproute/$name" -n "$WAITS_NS"
+}
+
+# EnterpriseAgentgatewayBackend is the one that puts its conditions where
+# kubectl wait can read them, at .status.conditions. Read from a live backend on
+# v2026.7.1: type Accepted, status True, message "Backend successfully accepted".
+wait_backend_accepted() {
+  local name=${1:?usage: wait_backend_accepted <backend>}
+  kubectl wait --for=condition=Accepted --timeout="${WAITS_TIMEOUT}s" \
+    "enterpriseagentgatewaybackend/$name" -n "$WAITS_NS"
+}
+
+# Budget conditions are at .status.conditions, so kubectl wait works. Confirmed
+# against a live budget on v2026.7.1: types Accepted and Enforced, both status
+# True, reasons Valid and Enforced.
+#
+# Enforced rather than Accepted on purpose: Step 14.3 is about the gap between
+# the two, where a budget is valid, compiled, and failing open.
 wait_budget_enforced() {
   local name=${1:?usage: wait_budget_enforced <budget>}
   kubectl wait --for=condition=Enforced --timeout="${WAITS_TIMEOUT}s" \

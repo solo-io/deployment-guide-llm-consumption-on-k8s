@@ -3,7 +3,8 @@
 # Puts the current shell into the state the guide assumes, without running the
 # guide. Sourced, never executed:
 #
-#     . ./session.sh
+#     . auto-build/lib/session.sh        from the repo root
+#     . ./lib/session.sh                  from auto-build/
 #
 # It evaluates the guide's environment setup block and its helper-function
 # blocks into your shell, applies your credentials over the placeholders that
@@ -44,10 +45,10 @@ else
 fi
 
 SESSION_EXTRACT=${SESSION_EXTRACT:-$SESSION_DIR/extract.sh}
-SESSION_GUIDE=${SESSION_GUIDE:-$SESSION_DIR/../docs/deployment-guide.md}
+SESSION_GUIDE=${SESSION_GUIDE:-$SESSION_DIR/../../docs/deployment-guide-keycloak.md}
 
 # UP_ENV_FILE is honoured so a fixture run can point at a throwaway file.
-SESSION_ENV_FILE=${UP_ENV_FILE:-$SESSION_DIR/.env.local}
+SESSION_ENV_FILE=${UP_ENV_FILE:-$SESSION_DIR/../.env.local}
 
 # The block that pins versions and sets the credential placeholders.
 SESSION_ENV_BLOCK=environment-setup-env
@@ -58,6 +59,11 @@ SESSION_ENV_BLOCK=environment-setup-env
 SESSION_HELPER_BLOCKS="ports-used-in-this-guide
 6-2-get-two-tokens-and-look-at
 6-2-get-two-tokens-and-look-at-2"
+
+# The one helper block that both defines get_token and calls it. preflight
+# checks Keycloak by evaluating this rather than by reimplementing the fetch: a
+# check that does not use the guide's own code is checking something else.
+SESSION_TOKEN_BLOCK=6-2-get-two-tokens-and-look-at
 
 SESSION_CREDENTIALS="AGENTGATEWAY_LICENSE_KEY ANTHROPIC_API_KEY OPENAI_API_KEY"
 
@@ -96,20 +102,72 @@ fi
 if $SESSION_COLOR; then
   SESSION_GREEN=$(printf '\033[32m')
   SESSION_RED=$(printf '\033[31m')
+  SESSION_BOLD=$(printf '\033[1m')
   SESSION_RESET=$(printf '\033[0m')
   SESSION_GLYPH_OK="${SESSION_GREEN}●${SESSION_RESET}"
   SESSION_GLYPH_FAIL="${SESSION_RED}✗${SESSION_RESET}"
+  # For a line that is neither: down.sh has four kinds, and only two of them are
+  # an outcome. Same width as the other two so the column holds.
+  SESSION_GLYPH_NONE=" "
 else
   SESSION_GREEN=""
   SESSION_RED=""
+  SESSION_BOLD=""
   SESSION_RESET=""
   SESSION_GLYPH_OK="[ok]  "
   SESSION_GLYPH_FAIL="[FAIL]"
+  SESSION_GLYPH_NONE="      "
 fi
 
 # Local ports the guide uses, and how long to wait for a new forward to answer.
-SESSION_PORTS="8081 15020 4000"
+SESSION_PORTS=${SESSION_PORTS:-"8081 15020 4000"}
 SESSION_FORWARD_TIMEOUT=${SESSION_FORWARD_TIMEOUT:-15}
+
+# --------------------------------------------------------------------------
+# The cluster this would act on, and asking first
+# --------------------------------------------------------------------------
+
+session_kube_context() {
+  kubectl config current-context 2>/dev/null
+}
+
+# The address behind the context, not the context name. A context called
+# `kind-kind` pointed at something else is exactly the mistake worth catching
+# before anything is created or removed.
+session_kube_apiserver() {
+  kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null
+}
+
+# session_confirm <approved> <action>
+#
+# Enter proceeds, anything else aborts. Asked only when stdin is a terminal and
+# approval was not given: a pipeline has nobody to ask, and stopping to wait for
+# an answer that cannot come is how a script hangs in CI.
+session_confirm() {
+  local approved=${1:-false} action=${2:-continue} reply
+
+  if [ "$approved" = true ]; then
+    printf '%sApproved with --approve.%s\n' "${SESSION_GREEN:-}" "${SESSION_RESET:-}"
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    printf 'stdin is not a terminal, so nothing was asked. Proceeding.\n'
+    return 0
+  fi
+
+  printf '\nPress Enter to %s, anything else to abort: ' "$action"
+  if ! IFS= read -r reply; then
+    printf '\nNo answer. Aborted, nothing was changed.\n'
+    return 1
+  fi
+
+  if [ -n "$reply" ]; then
+    printf '%sAborted, nothing was changed.%s\n' "${SESSION_RED:-}" "${SESSION_RESET:-}"
+    return 1
+  fi
+  return 0
+}
 
 # --------------------------------------------------------------------------
 # Blocks
@@ -143,7 +201,7 @@ session_eval_block() {
 
   if ! printf '%s\n' "$body" | bash -n 2>/dev/null; then
     echo "session.sh: block $id is not valid shell, so it was not evaluated." >&2
-    echo "session.sh: run ../auto-build/up.sh --dry-run, which names the line." >&2
+    echo "session.sh: run auto-build/up.sh --dry-run, which names the line." >&2
     return 1
   fi
 

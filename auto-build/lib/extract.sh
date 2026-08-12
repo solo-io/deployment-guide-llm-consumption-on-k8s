@@ -24,7 +24,7 @@
 # quietly omitting the block.
 #
 # Usage:
-#   ./extract.sh [--dry-run | --manifest] [file ...]
+#   ./lib/extract.sh [--dry-run | --manifest] [file ...]
 #
 #   default     write the block bodies to stdout, in document order, each
 #               preceded by a `# >>> id (file:line) when=x` marker
@@ -33,7 +33,8 @@
 #   --manifest  the same list, tab separated, for a runner to consume:
 #               id, file, line, line count, when
 #
-# Files default to ../docs/deployment-guide.md. Nothing is executed by any
+# Files default to ../../docs/deployment-guide-keycloak.md, resolved from this
+# script's own directory rather than the working one. Nothing is executed by any
 # mode. The default output is a shell script for the caller to run, not a run.
 #
 # Exits non-zero on a guide problem the runner cannot recover from: a `run` tag
@@ -66,7 +67,7 @@ for arg in "$@"; do
 done
 
 if [ ${#files[@]} -eq 0 ]; then
-  files=("$here/../docs/deployment-guide.md")
+  files=("$here/../../docs/deployment-guide-keycloak.md")
 fi
 
 # Column 0 only. The guide has no indented fences, and an indented one is list
