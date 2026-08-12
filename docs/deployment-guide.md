@@ -1553,9 +1553,33 @@ That applies within a model you have defined. A model you have not defined at al
 
 Check the cache rates rather than accepting them. Prompt caching changes real spend substantially, and a catalog that prices input and output but not `cacheRead` will overstate the cost of a caching workload.
 
+**Write it directly.** One model is enough to start, and you can add others as they appear in your
+traffic:
+
+```bash run id=11-1-write-catalog
+cat > ./catalog.json <<'EOF'
+{
+  "providers": {
+    "anthropic": {
+      "models": {
+        "claude-sonnet-4-6": {
+          "rates": {
+            "input": "3",
+            "output": "15",
+            "cacheRead": "0.3",
+            "cacheWrite": "3.75"
+          }
+        }
+      }
+    }
+  }
+}
+EOF
+```
+
 **Generating it with** `agctl`**, optionally.** The `agctl` CLI can pull current rates from models.dev, which saves typing for a first pass.
 
-```bash run id=11-1-build-a-catalog-curl
+```bash run id=11-1-build-a-catalog-curl when=manual
 # macOS, Apple Silicon
 curl -sL https://github.com/agentgateway/agentgateway/releases/latest/download/agctl-darwin-arm64 -o agctl
 # macOS, Intel: agctl-darwin-amd64
@@ -1656,11 +1680,13 @@ Multiple sources are merged in order, with later sources winning at the model le
 
 The proxy logs a catalog-loaded line on startup with provider and model counts.
 
-**Verified on v2026.7.1:**
-
 ```bash run id=11-4-confirm-it-loaded-and-is-logs-deployment-agentgateway-proxy
 kubectl logs deployment/agentgateway-proxy -n agentgateway-system | grep -iE 'catalog'
+```
 
+**Verified on v2026.7.1:**
+
+```text
 modelCatalog:
   - file: /etc/agentgateway/catalog/model_catalog.json
   - file: /etc/agentgateway/model-catalog/llm-model-costs/llm-model-costs.json
@@ -1699,7 +1725,7 @@ catalog_lookups_total{status="Exact",...,gen_ai_request_model="claude-haiku-4-5"
 
 **Audit which rates are actually yours.** The Cost Management export in Step 12 includes `Model cost catalog/model-cost-catalog.csv` with an `override` column, which is the cleanest answer available: it lists every model the gateway can price and flags which came from your ConfigMap.
 
-```bash run id=11-4-confirm-it-loaded-and-is
+```bash run id=11-4-confirm-it-loaded-and-is when=manual
 awk -F, 'NR>1 {c[$9]++} END {for (k in c) print k, c[k]}' \
   "Model cost catalog/model-cost-catalog.csv"
 
@@ -2114,26 +2140,6 @@ EOF
 ```
 
 `location` takes a header, query parameter, cookie or CEL expression, and exactly one of them. Putting keys on `x-api-key` rather than the default `Authorization` is what makes the next step possible.
-
-```bash run id=policy-llm-svc-apikey-auth-2
-kubectl apply -f- <<EOF
-apiVersion: enterpriseagentgateway.solo.io/v1alpha1
-kind: EnterpriseAgentgatewayPolicy
-metadata:
-  name: llm-svc-apikey-auth
-  namespace: agentgateway-system
-spec:
-  targetRefs:
-    - group: gateway.networking.k8s.io
-      kind: HTTPRoute
-      name: anthropic-claude-sonnet-svc
-  traffic:
-    apiKeyAuthentication:
-      mode: Strict
-      secretRef:
-        name: llm-virtual-keys
-EOF
-```
 
 > [!WARNING]
 > **Route-level auth leaves later routes open.** `targetRefs` cannot cross routes, so every route you add needs its own policy. Steps 15 and 16 each create one. Miss it and that route accepts anonymous traffic to a paid provider, with nothing to tell you: the route is healthy, the policies are valid, requests are served, and spend attributes to `user_id="unknown"`.
