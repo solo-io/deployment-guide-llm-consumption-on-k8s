@@ -1869,7 +1869,7 @@ send_traffic "${ADMIN_TOKEN}" dev-admin 5
 
 With your own IdP, export a token for any second caller in your allowed group:
 
-```bash run id=12-2-generate-traffic-worth-env-2
+```bash run id=12-2-generate-traffic-worth-env-2 when=manual
 export SECOND_TOKEN='<token for another caller in your allowed group>'
 send_traffic "${SECOND_TOKEN}" second-caller 5
 ```
