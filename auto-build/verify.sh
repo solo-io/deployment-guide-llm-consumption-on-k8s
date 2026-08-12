@@ -5,7 +5,7 @@
 #     ./verify.sh
 #
 # Point it at any cluster built from the guide, including one built by hand.
-# It sources session.sh first, so the versions, the helpers and the tokens it
+# It sources lib/session.sh first, so the versions, the helpers and the tokens it
 # needs are present and the port-forwards are up before anything is asserted.
 #
 # Every check prints PASS or FAIL with what was expected and what came back, and
@@ -143,14 +143,14 @@ body_of() { # body_of <path> <json> [header...]
 # Session
 # --------------------------------------------------------------------------
 
-[ -f "$here/session.sh" ] || die "not found: $here/session.sh"
+[ -f "$here/lib/session.sh" ] || die "not found: $here/lib/session.sh"
 
-# shellcheck source=session.sh
-. "$here/session.sh"
+# shellcheck source=lib/session.sh
+. "$here/lib/session.sh"
 session_status=$?
 
 if [ "$session_status" -ne 0 ]; then
-  die "session.sh could not put this shell in a state worth asserting against.
+  die "lib/session.sh could not put this shell in a state worth asserting against.
   What failed is above. A request through a port-forward that is not up returns
   nothing, and nothing looks the same as a masked value or a clean pass."
 fi

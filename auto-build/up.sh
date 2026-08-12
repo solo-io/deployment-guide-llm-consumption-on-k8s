@@ -2,14 +2,15 @@
 #
 # Builds the environment by running the guide.
 #
-# extract.sh pulls the runnable blocks out of docs/deployment-guide.md in
+# lib/extract.sh pulls the runnable blocks out of docs/deployment-guide-keycloak.md
 # document order. up.sh runs them, in one shell session, and runs the wait
-# keyed to each block ID in waits.sh before moving to the next. Exports and
+# keyed to each block ID in lib/waits.sh before moving to the next. Exports and
 # helper functions defined in one block are in scope for the next, exactly as
 # they are for a reader working through the guide in one terminal.
 #
 # Usage:
-#   ./up.sh                    build, then verify
+#   ./up.sh                    preflight, build, then verify
+#   ./up.sh --approve          do not stop to confirm the cluster first
 #   ./up.sh --no-verify        build only
 #   ./up.sh --dry-run          print the execution plan, run nothing
 #   ./up.sh --from <block-id>  resume from a block, after the prelude below
@@ -40,7 +41,8 @@
 #
 #   0        built, and verified
 #   2        would not start: bad arguments, a missing guide, a credential
-#            conflict, a block that is not valid shell
+#            conflict, a block that is not valid shell, a failed preflight, or
+#            you declining at its prompt
 #   3        built, but verify.sh found a control that is not enforcing
 #   other    the build failed, with the failing command's own status, so
 #            `command not found` stays distinguishable from a rejected manifest
@@ -74,15 +76,19 @@ set -Eeu
 self=${0##*/}
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-EXTRACT=$here/extract.sh
-WAITS=$here/waits.sh
-SESSION=$here/session.sh
+# The libraries live in lib/, the entry points beside this one. Both resolved
+# from $here, so these work from the repo root as well as from auto-build/.
+EXTRACT=$here/lib/extract.sh
+WAITS=$here/lib/waits.sh
+SESSION=$here/lib/session.sh
 # UP_VERIFY is a test hook, so a fixture run can point at a stub instead of the
 # real one and not spend money on a provider to prove the wiring works.
 VERIFY=${UP_VERIFY:-$here/verify.sh}
-GUIDE=$here/../docs/deployment-guide.md
+# UP_PREFLIGHT is the same kind of test hook as UP_VERIFY.
+PREFLIGHT=${UP_PREFLIGHT:-$here/preflight.sh}
+GUIDE=$here/../docs/deployment-guide-keycloak.md
 
-# session.sh holds the credential handling and the port-forward handling, and
+# lib/session.sh holds the credential handling and the port-forward handling, and
 # defines which block sets the environment and which blocks define the helpers.
 # It is sourced rather than copied so there is one implementation of each and not
 # two that drift. SESSION_DEFS_ONLY stops it acting on being sourced: up.sh runs
@@ -104,6 +110,8 @@ FORWARD_NS=$SESSION_FORWARD_NS
 dry_run=false
 from_id=""
 verify=true
+approve=false
+guide_overridden=false
 
 # --------------------------------------------------------------------------
 # Failure reporting
@@ -114,7 +122,7 @@ verify=true
 # An exiting ERR trap looks like the obvious way to do this and is wrong. It
 # fires on failures that are expected: a command substitution that fails inside
 # a polling loop, `code=$(curl ...) || fallback`, `KC_IP=$(docker inspect ...)`.
-# Those are ordinary shell that the guide and waits.sh both contain, and none of
+# Those are ordinary shell that the guide and lib/waits.sh both contain, and none of
 # them should end a build. Worse, when such a failure happens inside a
 # redirected command the trap's own output goes wherever that redirection
 # points, so the report disappears and the run dies with no explanation. That is
@@ -169,7 +177,7 @@ on_exit() {
     return
   fi
 
-  printf '%s %s/%s  %s\n' \
+  printf '\n%s %s/%s  %s\n' \
     "${SESSION_GLYPH_FAIL:-[FAIL]}" "$CUR_POS" "$CUR_TOTAL" "$CUR_ID" >&3
   echo >&3
   if [ "$CUR_PHASE" = wait ]; then
@@ -190,7 +198,7 @@ on_exit() {
 
   if [ "$CUR_PHASE" = wait ]; then
     echo "The block itself ran. Its readiness condition did not come true in" >&3
-    echo "time, so either the condition in waits.sh is wrong or the thing it" >&3
+    echo "time, so either the condition in lib/waits.sh is wrong or the thing it" >&3
     echo "waits for is not happening. Look at the resource before changing the" >&3
     echo "wait: a condition that never arrives and a product that never gets" >&3
     echo "there produce the same timeout." >&3
@@ -235,8 +243,10 @@ while [ $# -gt 0 ]; do
       shift
       [ $# -gt 0 ] || die "--guide needs a file"
       GUIDE=$1
+      guide_overridden=true
       ;;
     --no-verify) verify=false ;;
+    --approve)   approve=true ;;
     -h|--help)
       sed -n '3,53p' "$0" | cut -c 3-
       exit 0
@@ -246,9 +256,19 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+if $approve && $dry_run; then
+  die "--approve with --dry-run is a contradiction: a dry run changes nothing, so
+  there is nothing to approve. Accepting both would teach the habit of typing
+  --approve without reading what follows it, which is the habit that ends with an
+  approved build against the wrong cluster."
+fi
+
 [ -f "$GUIDE" ] || die "no such guide: $GUIDE"
 if $verify && [ ! -x "$VERIFY" ]; then
   die "not executable: $VERIFY. Use --no-verify to build without it."
+fi
+if ! $dry_run && [ ! -x "$PREFLIGHT" ]; then
+  die "not executable: $PREFLIGHT"
 fi
 [ -x "$EXTRACT" ] || die "not executable: $EXTRACT"
 [ -f "$WAITS" ] || die "not found: $WAITS"
@@ -314,6 +334,46 @@ while IFS="$(printf '\t')" read -r m_id _ m_line m_count _; do
   m_i=$((m_i + 1))
 done < "$tmp/manifest"
 [ "$m_i" = "$count" ] || die "$count blocks in the stream, $m_i in the manifest"
+
+# --------------------------------------------------------------------------
+# Every wait has to be keyed to a block that exists
+#
+# A wait keyed to an ID the guide no longer has never fires, and nothing says so:
+# the block runs, the wait is looked up, nothing comes back, and the run carries
+# on without the readiness condition somebody wrote deliberately. That has now
+# happened twice, both times because a block was renamed or removed in the guide.
+#
+# Only against the shipped guide. waits.sh is keyed to that one, so keys not
+# appearing in some other document is expected rather than wrong.
+# --------------------------------------------------------------------------
+
+if $guide_overridden; then
+  echo "waits: not checked against $(basename "$GUIDE"), which is not the shipped guide."
+else
+  all_ids="|"
+  i=0
+  while [ $i -lt "$count" ]; do
+    all_ids="$all_ids${ids[$i]}|"
+    i=$((i + 1))
+  done
+
+  stale=""
+  for id in $(wait_ids); do
+    case $all_ids in
+      *"|$id|"*) ;;
+      *) stale="$stale $id" ;;
+    esac
+  done
+
+  if [ -n "$stale" ]; then
+    die "waits.sh is keyed to block IDs the guide does not have:$stale
+  A wait keyed to a block that no longer exists never fires, and says nothing
+  when it does not. Either the block was renamed, and the key should follow it,
+  or it is gone, and so should the key be."
+  fi
+  printf 'waits: %s conditions, every one keyed to a block that exists.\n' \
+    "$(wait_ids | grep -c .)"
+fi
 
 # --------------------------------------------------------------------------
 # Decide what runs
@@ -442,6 +502,7 @@ print_plan() {
   if [ -n "$from_id" ]; then
     printf 'from:        %s (block %s)\n' "$from_id" "$((start_index + 1))"
   fi
+  printf 'first:       %s, which asks before anything is created\n' "${PREFLIGHT#"$here/"}"
   if $verify; then
     printf 'then:        %s\n' "${VERIFY#"$here/"}"
   else
@@ -497,7 +558,7 @@ run_block() {
   # running, so the block's own output underneath it is attributable and a slow
   # step is not silence. Indented and without the counter, because the result
   # line below carries that and repeating it reads as noise.
-  printf '\n  %s  (%s:%s)\n' "$CUR_ID" "${GUIDE##*/}" "$CUR_LINE"
+  printf '  %s  (%s:%s)\n' "$CUR_ID" "${GUIDE##*/}" "$CUR_LINE"
 
   eval "${bodies[$i]}"
 
@@ -511,7 +572,13 @@ run_block() {
 
   # After the wait, not before it: the glyph stands for the block and its
   # readiness condition together, which is what "this step is done" means here.
-  printf '%s %s/%s  %s\n' "${SESSION_GLYPH_OK:-[ok]}" "$pos" "$total" "$CUR_ID"
+  #
+  # The leading newline is what keeps the glyph column intact. Some of the guide's
+  # commands end their output without one -- the Step 5 and 6.1 curls both print
+  # JSON that way -- and without this the glyph lands on the end of that line
+  # instead of at the start of its own. It costs nothing: the blank moved here
+  # from the front of the line above, so the shape per block is unchanged.
+  printf '\n%s %s/%s  %s\n' "${SESSION_GLYPH_OK:-[ok]}" "$pos" "$total" "$CUR_ID"
 
   CUR_PHASE=""
   CUR_WAIT=""
@@ -550,8 +617,27 @@ start_time=$SECONDS
 printf 'guide:   %s\n' "${GUIDE#"$here/../"}"
 printf 'running: %s of %s blocks\n' "$total" "$count"
 
-# Before the first block. A previous run that failed, or was interrupted, or
-# rolled the proxy pod, leaves forwards holding 8081, 15020 and 4000.
+# Before the first block, and before anything is created. preflight asks about
+# the cluster and refuses to let a build start on ground that cannot hold it.
+echo
+preflight_args=""
+$approve && preflight_args=--approve
+# The status is captured rather than read inside `if ! ...`: there, $? is the
+# status of the negation, which is always 0, and every failure would look the
+# same. `|| pf_status=$?` also keeps set -e from ending the run before the reason
+# can be reported.
+pf_status=0
+"$PREFLIGHT" --guide "$GUIDE" $preflight_args || pf_status=$?
+if [ "$pf_status" -ne 0 ]; then
+  case $pf_status in
+    3) die "not started: you declined at the preflight prompt." ;;
+    *) die "not started: preflight failed. Nothing was created." ;;
+  esac
+fi
+
+# A previous run that failed, or was interrupted, or rolled the proxy pod, leaves
+# forwards holding 8081, 15020 and 4000.
+echo
 RUN_STARTED=true
 session_kill_forwards 1
 

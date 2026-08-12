@@ -4,6 +4,7 @@
 #
 # Usage:
 #   ./down.sh                  the namespace, the Helm releases, the forwards
+#   ./down.sh --approve        do not stop to confirm the cluster first
 #   ./down.sh --dry-run        say what would go, remove nothing
 #   ./down.sh --crds           also the CRDs
 #   ./down.sh --keycloak       also the Attachment A container
@@ -45,9 +46,11 @@ set -u
 self=${0##*/}
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 
-SESSION=$here/session.sh
+# Resolved from this script's directory, not the working one.
+SESSION=$here/lib/session.sh
 
 dry_run=false
+approve=false
 do_crds=false
 do_keycloak=false
 do_cluster=false
@@ -66,6 +69,7 @@ die() {
 while [ $# -gt 0 ]; do
   case $1 in
     --dry-run)  dry_run=true ;;
+    --approve)  approve=true ;;
     --crds)     do_crds=true ;;
     --keycloak) do_keycloak=true ;;
     --cluster)  do_cluster=true ;;
@@ -78,6 +82,13 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if $approve && $dry_run; then
+  die "--approve with --dry-run is a contradiction: a dry run removes nothing, so
+  there is nothing to approve. Accepting both would teach the habit of typing
+  --approve without reading what follows it, and what follows this one is a
+  namespace going away."
+fi
 
 [ -f "$SESSION" ] || die "not found: $SESSION"
 
@@ -98,249 +109,292 @@ SESSION_FORWARD_PATTERN="kubectl port-forward.*$NS"
 # Reporting
 # --------------------------------------------------------------------------
 
-gone()    { removed=$((removed + 1));   printf '  removed   %s\n' "$1"; }
-missing() { absent=$((absent + 1));     printf '  absent    %s\n' "$1"; }
-would()   {                             printf '  would go  %s\n' "$1"; }
-kept()    {                             printf '  kept      %s\n' "$1"; }
-problem() { problems=$((problems + 1)); printf '  FAILED    %s: %s\n' "$1" "$2"; }
+# Only two of these four are an outcome, so only two take a glyph. Absent, would
+# go and kept get the same width of nothing, which keeps the column straight in
+# colour and out of it.
+gone()    { removed=$((removed + 1))
+            printf '%s removed   %s\n' "${SESSION_GLYPH_OK:-[ok]}" "$1"; }
+missing() { absent=$((absent + 1))
+            printf '%s absent    %s\n' "${SESSION_GLYPH_NONE:-      }" "$1"; }
+would()   { printf '%s would go  %s\n' "${SESSION_GLYPH_NONE:-      }" "$1"; }
+kept()    { printf '%s kept      %s\n' "${SESSION_GLYPH_NONE:-      }" "$1"; }
+problem() { problems=$((problems + 1))
+            printf '%s FAILED    %s: %s\n' "${SESSION_GLYPH_FAIL:-[FAIL]}" "$1" "$2"; }
 
 # --------------------------------------------------------------------------
 # Is there a cluster at all
 # --------------------------------------------------------------------------
 
 cluster_up=false
-if kubectl cluster-info --request-timeout=5s >/dev/null 2>&1; then
+if kubectl cluster-info --request-timeout=5s </dev/null >/dev/null 2>&1; then
   cluster_up=true
 fi
 
-echo "tearing down:"
-printf '  namespace %s, context %s\n' "$NS" "$(kubectl config current-context 2>/dev/null || echo none)"
-$dry_run && echo "  --dry-run, so nothing will be removed"
-echo
-
-# --------------------------------------------------------------------------
-# 1. Port-forwards
-#
-# Before anything else. A forward outlives what it points at, so one left open
-# against a namespace that no longer exists is a local port held for nothing.
-# --------------------------------------------------------------------------
-
-echo "port-forwards:"
-n=$(pgrep -f "$SESSION_FORWARD_PATTERN" 2>/dev/null | wc -l | tr -d ' ')
-[ -n "$n" ] || n=0
-if [ "$n" -eq 0 ]; then
-  missing "port-forwards for $NS"
-else
-  plural=s
-  [ "$n" -eq 1 ] && plural=""
-  if $dry_run; then
-    would "$n port-forward$plural for $NS"
-  else
-    session_kill_forwards 1 >/dev/null
-    gone "$n port-forward$plural for $NS"
-  fi
-fi
-echo
-
-# --------------------------------------------------------------------------
-# 2. What the guide created in the namespace
-#
-# By kind, while the controller is still running. A custom resource with a
-# finalizer on it outlives its controller, and deleting the namespace first can
-# then sit in Terminating with nothing left to process the finalizer.
-# --------------------------------------------------------------------------
-
-GUIDE_KINDS="eagpol eagbud enterpriseagentgatewaybackend enterpriseagentgatewayparameters
-httproute gateway"
-
-delete_all_of() { # delete_all_of <kind>
-  local kind=$1 names
-
-  # Missing kind and no objects of that kind are different things, and only the
-  # second one is worth a line. `--ignore-not-found` covers absent objects, not
-  # an absent CRD.
-  if ! kubectl get "$kind" -n "$NS" >/dev/null 2>&1; then
-    missing "$kind (kind not installed)"
-    return 0
-  fi
-
-  names=$(kubectl get "$kind" -n "$NS" -o name 2>/dev/null)
-  if [ -z "$names" ]; then
-    missing "$kind (none in $NS)"
-    return 0
-  fi
-
-  local count
-  count=$(printf '%s\n' "$names" | grep -c .)
-  if $dry_run; then
-    would "$count $kind in $NS"
-    return 0
-  fi
-
-  if kubectl delete "$kind" --all -n "$NS" --ignore-not-found --timeout=120s >/dev/null 2>&1; then
-    gone "$count $kind in $NS"
-  else
-    problem "$kind" "kubectl delete did not finish"
-  fi
+# The context first and prominently, in both paths. The mistake this is here to
+# stop is not "did I mean to tear down", it is "did I mean to tear down *this*".
+print_target() {
+  printf '%s, from:\n' "$1"
+  printf '  context     %s%s%s\n' \
+    "${SESSION_BOLD:-}" "$(session_kube_context || echo none)" "${SESSION_RESET:-}"
+  printf '  apiserver   %s\n' "$(session_kube_apiserver || echo unknown)"
+  printf '  namespace   %s\n' "$NS"
 }
 
-echo "resources in $NS:"
-if ! $cluster_up; then
-  missing "everything in the cluster (no cluster reachable)"
-elif ! kubectl get namespace "$NS" >/dev/null 2>&1; then
-  missing "namespace $NS, so nothing inside it either"
-else
-  for kind in $(printf '%s' "$GUIDE_KINDS"); do
-    delete_all_of "$kind"
-  done
-fi
-echo
-
 # --------------------------------------------------------------------------
-# 3. Helm releases
+# The teardown itself, as one function so it can be run twice: once to
+# enumerate, whose output becomes the list you are asked to approve, and once to
+# act. The enumerating pass only reads.
 # --------------------------------------------------------------------------
 
-RELEASES="management enterprise-agentgateway enterprise-agentgateway-crds"
+teardown() {
+  # --------------------------------------------------------------------------
+  # 1. Port-forwards
+  #
+  # Before anything else. A forward outlives what it points at, so one left open
+  # against a namespace that no longer exists is a local port held for nothing.
+  # --------------------------------------------------------------------------
 
-echo "helm releases:"
-if ! $cluster_up; then
-  missing "all releases (no cluster reachable)"
-elif ! command -v helm >/dev/null 2>&1; then
-  problem "helm" "not installed, so the releases cannot be uninstalled"
-else
-  installed=$(helm list -n "$NS" -q 2>/dev/null)
-  for release in $(printf '%s' "$RELEASES"); do
-    case "
-$installed
-" in
-      *"
-$release
-"*)
-        if $dry_run; then
-          would "helm release $release"
-        elif helm uninstall "$release" -n "$NS" --wait --timeout 3m >/dev/null 2>&1; then
-          gone "helm release $release"
-        else
-          problem "helm release $release" "uninstall failed"
-        fi
-        ;;
-      *) missing "helm release $release" ;;
-    esac
-  done
-fi
-echo
-
-# --------------------------------------------------------------------------
-# 4. The namespace
-# --------------------------------------------------------------------------
-
-echo "namespace:"
-if ! $cluster_up; then
-  missing "namespace $NS (no cluster reachable)"
-elif ! kubectl get namespace "$NS" >/dev/null 2>&1; then
-  missing "namespace $NS"
-elif $dry_run; then
-  would "namespace $NS, and anything still in it"
-elif kubectl delete namespace "$NS" --ignore-not-found --timeout=180s >/dev/null 2>&1; then
-  gone "namespace $NS"
-else
-  problem "namespace $NS" "still deleting after 180s, usually a finalizer. kubectl get all -n $NS"
-fi
-echo
-
-# --------------------------------------------------------------------------
-# 5. CRDs, opt in
-# --------------------------------------------------------------------------
-
-if $do_crds; then
-  echo "CRDs:"
-  if ! $cluster_up; then
-    missing "CRDs (no cluster reachable)"
+  echo "port-forwards:"
+  n=$(pgrep -f "$SESSION_FORWARD_PATTERN" 2>/dev/null | wc -l | tr -d ' ')
+  [ -n "$n" ] || n=0
+  if [ "$n" -eq 0 ]; then
+    missing "port-forwards for $NS"
   else
-    for group in enterpriseagentgateway.solo.io agentgateway.dev gateway.networking.k8s.io; do
-      crds=$(kubectl get crd -o name 2>/dev/null | grep "\.$group\$")
-      if [ -z "$crds" ]; then
-        missing "CRDs for $group"
-        continue
-      fi
-      count=$(printf '%s\n' "$crds" | grep -c .)
-      if $dry_run; then
-        would "$count CRDs for $group, and every resource of those kinds in the cluster"
-      elif printf '%s\n' "$crds" | xargs kubectl delete --ignore-not-found --timeout=120s >/dev/null 2>&1; then
-        gone "$count CRDs for $group"
-      else
-        problem "CRDs for $group" "kubectl delete did not finish"
-      fi
+    plural=s
+    [ "$n" -eq 1 ] && plural=""
+    if $dry_run; then
+      would "$n port-forward$plural for $NS"
+    else
+      session_kill_forwards 1 >/dev/null
+      gone "$n port-forward$plural for $NS"
+    fi
+  fi
+  echo
+
+  # --------------------------------------------------------------------------
+  # 2. What the guide created in the namespace
+  #
+  # By kind, while the controller is still running. A custom resource with a
+  # finalizer on it outlives its controller, and deleting the namespace first can
+  # then sit in Terminating with nothing left to process the finalizer.
+  # --------------------------------------------------------------------------
+
+  GUIDE_KINDS="eagpol eagbud enterpriseagentgatewaybackend enterpriseagentgatewayparameters
+  httproute gateway"
+
+  delete_all_of() { # delete_all_of <kind>
+    local kind=$1 names
+
+    # Missing kind and no objects of that kind are different things, and only the
+    # second one is worth a line. `--ignore-not-found` covers absent objects, not
+    # an absent CRD.
+    if ! kubectl get "$kind" -n "$NS" >/dev/null 2>&1; then
+      missing "$kind (kind not installed)"
+      return 0
+    fi
+
+    names=$(kubectl get "$kind" -n "$NS" -o name 2>/dev/null)
+    if [ -z "$names" ]; then
+      missing "$kind (none in $NS)"
+      return 0
+    fi
+
+    local count
+    count=$(printf '%s\n' "$names" | grep -c .)
+    if $dry_run; then
+      would "$count $kind in $NS"
+      return 0
+    fi
+
+    if kubectl delete "$kind" --all -n "$NS" --ignore-not-found --timeout=120s >/dev/null 2>&1; then
+      gone "$count $kind in $NS"
+    else
+      problem "$kind" "kubectl delete did not finish"
+    fi
+  }
+
+  echo "resources in $NS:"
+  if ! $cluster_up; then
+    missing "everything in the cluster (no cluster reachable)"
+  elif ! kubectl get namespace "$NS" >/dev/null 2>&1; then
+    missing "namespace $NS, so nothing inside it either"
+  else
+    for kind in $(printf '%s' "$GUIDE_KINDS"); do
+      delete_all_of "$kind"
     done
   fi
   echo
-else
-  echo "CRDs:"
-  kept "CRDs, which up.sh reinstalls. --crds removes them"
+
+  # --------------------------------------------------------------------------
+  # 3. Helm releases
+  # --------------------------------------------------------------------------
+
+  RELEASES="management enterprise-agentgateway enterprise-agentgateway-crds"
+
+  echo "helm releases:"
+  if ! $cluster_up; then
+    missing "all releases (no cluster reachable)"
+  elif ! command -v helm >/dev/null 2>&1; then
+    problem "helm" "not installed, so the releases cannot be uninstalled"
+  else
+    installed=$(helm list -n "$NS" -q 2>/dev/null)
+    for release in $(printf '%s' "$RELEASES"); do
+      case "
+  $installed
+  " in
+        *"
+  $release
+  "*)
+          if $dry_run; then
+            would "helm release $release"
+          elif helm uninstall "$release" -n "$NS" --wait --timeout 3m >/dev/null 2>&1; then
+            gone "helm release $release"
+          else
+            problem "helm release $release" "uninstall failed"
+          fi
+          ;;
+        *) missing "helm release $release" ;;
+      esac
+    done
+  fi
   echo
-fi
 
-# --------------------------------------------------------------------------
-# 6. Keycloak, opt in. Attachment A, not the guide.
-# --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # 4. The namespace
+  # --------------------------------------------------------------------------
 
-if $do_keycloak; then
-  echo "keycloak:"
-  if ! command -v docker >/dev/null 2>&1; then
-    missing "the keycloak container (no docker)"
-  elif [ -z "$(docker ps -aq --filter name=^keycloak$ 2>/dev/null)" ]; then
-    missing "the keycloak container"
+  echo "namespace:"
+  if ! $cluster_up; then
+    missing "namespace $NS (no cluster reachable)"
+  elif ! kubectl get namespace "$NS" >/dev/null 2>&1; then
+    missing "namespace $NS"
   elif $dry_run; then
-    would "the keycloak container, and the realm in it"
-  elif docker rm -f keycloak >/dev/null 2>&1; then
-    gone "the keycloak container"
+    would "namespace $NS, and anything still in it"
+  elif kubectl delete namespace "$NS" --ignore-not-found --timeout=180s >/dev/null 2>&1; then
+    gone "namespace $NS"
   else
-    problem "the keycloak container" "docker rm failed"
+    problem "namespace $NS" "still deleting after 180s, usually a finalizer. kubectl get all -n $NS"
   fi
   echo
-fi
 
-# --------------------------------------------------------------------------
-# 7. The cluster, opt in
-# --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # 5. CRDs, opt in
+  # --------------------------------------------------------------------------
 
-if $do_cluster; then
-  echo "cluster:"
-  if ! command -v kind >/dev/null 2>&1; then
-    missing "the kind cluster (no kind binary, so it was not made by kind)"
-  elif ! kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
-    missing "kind cluster $KIND_CLUSTER_NAME"
-  elif $dry_run; then
-    would "kind cluster $KIND_CLUSTER_NAME, and everything in it"
-  elif kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1; then
-    gone "kind cluster $KIND_CLUSTER_NAME"
+  if $do_crds; then
+    echo "CRDs:"
+    if ! $cluster_up; then
+      missing "CRDs (no cluster reachable)"
+    else
+      for group in enterpriseagentgateway.solo.io agentgateway.dev gateway.networking.k8s.io; do
+        crds=$(kubectl get crd -o name 2>/dev/null | grep "\.$group\$")
+        if [ -z "$crds" ]; then
+          missing "CRDs for $group"
+          continue
+        fi
+        count=$(printf '%s\n' "$crds" | grep -c .)
+        if $dry_run; then
+          would "$count CRDs for $group, and every resource of those kinds in the cluster"
+        elif printf '%s\n' "$crds" | xargs kubectl delete --ignore-not-found --timeout=120s >/dev/null 2>&1; then
+          gone "$count CRDs for $group"
+        else
+          problem "CRDs for $group" "kubectl delete did not finish"
+        fi
+      done
+    fi
+    echo
   else
-    problem "kind cluster $KIND_CLUSTER_NAME" "kind delete failed"
+    echo "CRDs:"
+    kept "CRDs, which up.sh reinstalls. --crds removes them"
+    echo
   fi
-  echo
-fi
 
-# --------------------------------------------------------------------------
-# Files, reported and left alone
-# --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
+  # 6. Keycloak, opt in. Attachment A, not the guide.
+  # --------------------------------------------------------------------------
 
-echo "files:"
-for f in "$here/agentgateway-values.yaml" "$here/catalog.json"; do
-  if [ -f "$f" ]; then
-    kept "${f#"$here/"}"
-  else
-    missing "${f#"$here/"}"
+  if $do_keycloak; then
+    echo "keycloak:"
+    if ! command -v docker >/dev/null 2>&1; then
+      missing "the keycloak container (no docker)"
+    elif [ -z "$(docker ps -aq --filter name=^keycloak$ 2>/dev/null)" ]; then
+      missing "the keycloak container"
+    elif $dry_run; then
+      would "the keycloak container, and the realm in it"
+    elif docker rm -f keycloak >/dev/null 2>&1; then
+      gone "the keycloak container"
+    else
+      problem "the keycloak container" "docker rm failed"
+    fi
+    echo
   fi
-done
+
+  # --------------------------------------------------------------------------
+  # 7. The cluster, opt in
+  # --------------------------------------------------------------------------
+
+  if $do_cluster; then
+    echo "cluster:"
+    if ! command -v kind >/dev/null 2>&1; then
+      missing "the kind cluster (no kind binary, so it was not made by kind)"
+    elif ! kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
+      missing "kind cluster $KIND_CLUSTER_NAME"
+    elif $dry_run; then
+      would "kind cluster $KIND_CLUSTER_NAME, and everything in it"
+    elif kind delete cluster --name "$KIND_CLUSTER_NAME" >/dev/null 2>&1; then
+      gone "kind cluster $KIND_CLUSTER_NAME"
+    else
+      problem "kind cluster $KIND_CLUSTER_NAME" "kind delete failed"
+    fi
+    echo
+  fi
+
+  # --------------------------------------------------------------------------
+  # Files, reported and left alone
+  # --------------------------------------------------------------------------
+
+  echo "files:"
+  for f in "$here/agentgateway-values.yaml" "$here/catalog.json"; do
+    if [ -f "$f" ]; then
+      kept "${f#"$here/"}"
+    else
+      missing "${f#"$here/"}"
+    fi
+  done
+
+}
 
 # --------------------------------------------------------------------------
+# Ask first, showing the context and what would go
+# --------------------------------------------------------------------------
 
-echo
 if $dry_run; then
+  print_target "this would remove"
+  echo
+  teardown
+  echo
   echo "Nothing was removed. Run without --dry-run to do it."
   exit 0
 fi
 
+# The plan comes from the same code that does the work, run with dry_run on, in a
+# subshell so its counters do not carry into the real pass.
+plan=$( dry_run=true; teardown )
+
+print_target "this would remove"
+echo
+printf '%s\n' "$plan" | sed 's/^/  /'
+
+if ! session_confirm "$approve" "remove this from $(session_kube_context || echo 'no context')"; then
+  exit 3
+fi
+
+echo
+teardown
+
+# --------------------------------------------------------------------------
+
+echo
 printf '%s removed, %s already absent' "$removed" "$absent"
 [ "$problems" -gt 0 ] && printf ', %s failed' "$problems"
 printf '.\n'
@@ -349,11 +403,11 @@ if [ "$problems" -eq 0 ]; then
   if [ "$removed" -eq 0 ]; then
     echo "There was nothing to remove. Running this again will say the same."
   else
-    echo "Run ./up.sh to build it again."
+    echo "${SESSION_GREEN:-}Torn down. Run ./up.sh to build it again.${SESSION_RESET:-}"
   fi
 else
   echo
-  echo "What failed is above. A namespace that will not go is usually a finalizer"
+  echo "${SESSION_RED:-}What failed is above.${SESSION_RESET:-} A namespace that will not go is usually a finalizer"
   echo "on a resource whose controller has already been uninstalled."
 fi
 
