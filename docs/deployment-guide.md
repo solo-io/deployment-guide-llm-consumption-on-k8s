@@ -77,8 +77,8 @@ Set these before running anything. Every command below uses them, and setting th
 ```bash run id=environment-setup-env
 # Pinned versions
 export AGENT_GATEWAY_VERSION=v2026.7.1
-export SOLO_UI_VERSION=0.5.2
-export GATEWAY_API_VERSION=v1.5.0
+export SOLO_UI_VERSION=0.5.3
+export GATEWAY_API_VERSION=v1.6.1
 export KEYCLOAK_VERSION=26.1.3
 
 # Solo Enterprise license. Contact your Solo account team if you do not have one.
