@@ -108,21 +108,22 @@ disagree about what is being deployed.
 
 ## Versioning
 
-This guide follows [Semantic Versioning](https://semver.org/). The version describes the guide,
-not the products it deploys.
+This guide follows [Semantic Versioning](https://semver.org/). The version
+describes the guide, not the products it deploys.
 
 | Bump | When |
 |---|---|
-| **Major** | A product is added to the solution. |
-| **Minor** | Recertification. Triggered when one or more products in the solution ship an LTS release. Includes any new features that arrive with it. Adjacent drops may be bundled into a single recertification. |
+| **Major** | A significant change to the solution. Recorded in `DECISIONS.md` when it happens. |
+| **Minor** | Recertification against a new LTS release of a Solo product in the solution, including any features that arrive with it. Also substantive content changes on an unchanged product surface: swapping the reference third-party service, adding a section or attachment, reworking an existing one. |
 | **Patch** | Documentation corrections and automation script fixes. |
 
-Each release lists the product versions it was validated against, and any notable features added.
-Use the release notes and the diff between releases to see what changed.
+Each release lists the product versions it was validated against, and any
+notable features added. Use the release notes and the diff between releases
+to see what changed.
 
-**Scope:** this guide documents a validated deployment at a point in time. It does not cover
-upgrade paths between product versions, and does not track product breaking changes. Those belong
-to the product documentation.
+Scope: this guide documents a validated deployment at a point in time. It
+does not cover upgrade paths between product versions, and does not track
+product breaking changes. Those belong to the product documentation.
 
 ---
 
