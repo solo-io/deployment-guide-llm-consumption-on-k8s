@@ -486,7 +486,7 @@ helm list -n agentgateway-system
 NAME                          CHART                                   APP VERSION
 enterprise-agentgateway       enterprise-agentgateway-v2026.7.1       2026.7.1
 enterprise-agentgateway-crds  enterprise-agentgateway-crds-v2026.7.1  2026.7.1
-management                    management-0.5.2
+management                    management-0.5.3
 ```
 
 The UI reports the same version you pinned. If it does not, you are almost certainly looking at a cached build: reload in a private browsing window before treating it as a failed install. `helm list` is the authority for what is actually deployed.
