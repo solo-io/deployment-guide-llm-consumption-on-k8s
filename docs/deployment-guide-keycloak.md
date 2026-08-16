@@ -3228,7 +3228,7 @@ curl -s http://localhost:8081/llm \
   -H "Authorization: Bearer ${ALLOWED_TOKEN}" -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4-6","max_tokens":5000,
        "messages":[{"role":"user","content":"Write a long story about a lighthouse."}]}' \
-  | jq '{stop_reason, output_tokens: .usage.output_tokens}'
+  | jq '{usage, choices: [.choices[] | {index, finish_reason}]}'
 ```
 
 **Verified on v2026.7.1, with the caller asking for 5,000:**
@@ -3236,17 +3236,26 @@ curl -s http://localhost:8081/llm \
 ```json
 {
   "usage": {
-    "prompt_tokens": 31,
+    "prompt_tokens": 50,
     "completion_tokens": 500,
-    "total_tokens": 531
+    "total_tokens": 550,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    },
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
   },
   "choices": [
-    { "index": 0, "finish_reason": "length" }
+    {
+      "index": 0,
+      "finish_reason": "length"
+    }
   ]
 }
 ```
 
-The prompt was untouched at 31 tokens and only the completion was capped, at exactly the ceiling, with `finish_reason: "length"` rather than `"stop"` — the model ran out of room rather than finishing.
+The prompt was untouched at 50 tokens and only the completion was capped, at exactly the ceiling, with `finish_reason: "length"` rather than `"stop"` — the model ran out of room rather than finishing. The prompt count includes the system prompt injected in 17.1, which is still attached to the backend at this point.
 
 > [!WARNING]
 > **Read the response in OpenAI shape, not the provider’s.** The gateway normalises, so the fields are `choices[0].finish_reason` and `usage.completion_tokens`. Querying Anthropic’s native `stop_reason` and `usage.output_tokens` returns null for both, which looks exactly like a cap that did not apply.
