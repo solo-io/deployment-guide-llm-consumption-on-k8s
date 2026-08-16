@@ -486,7 +486,7 @@ helm list -n agentgateway-system
 NAME                          CHART                                   APP VERSION
 enterprise-agentgateway       enterprise-agentgateway-v2026.7.1       2026.7.1
 enterprise-agentgateway-crds  enterprise-agentgateway-crds-v2026.7.1  2026.7.1
-management                    management-0.5.2
+management                    management-0.5.3
 ```
 
 The UI reports the same version you pinned. If it does not, you are almost certainly looking at a cached build: reload in a private browsing window before treating it as a failed install. `helm list` is the authority for what is actually deployed.
@@ -1534,7 +1534,7 @@ Without this, you are multiplying token counts by rates you maintain by hand in 
 
 The catalog is a JSON file you own. Nothing generates it for you at runtime, and the rates in it are yours to maintain. They are what your spend is calculated against.
 
-**Two catalogs are loaded, and yours takes precedence.** Alongside your ConfigMap the proxy loads a catalog shipped with the release, carrying list rates for 82 models across `anthropic`, `openai` and `gcp.gemini`. Verified on v2026.7.1: where both define the same model, your rate is the one applied. What the shipped catalog changes is coverage, not precedence — see 11.4.
+**Two catalogs are loaded, and yours takes precedence.** Alongside your ConfigMap the proxy loads a catalog shipped with the release, carrying list rates across `anthropic`, `openai` and `gcp.gemini`. How many models it covers moves with the release, so read the count your own cluster loaded rather than relying on one printed here. 11.4 is where that count appears. Verified on v2026.7.1: where both define the same model, your rate is the one applied. What the shipped catalog changes is coverage, not precedence.
 
 **The format,** because you will want to override a rate at some point regardless of how you create the file:
 
@@ -1701,13 +1701,13 @@ modelCatalog:
   - file: /etc/agentgateway/catalog/model_catalog.json
   - file: /etc/agentgateway/model-catalog/llm-model-costs/llm-model-costs.json
 2026-08-08T18:54:59.892821Z  info  llm::cost  watching model catalog files  count=2
-2026-08-08T18:54:59.893951Z  info  llm::cost  model catalog loaded  providers=3 models=82
+2026-08-08T18:54:59.893951Z  info  llm::cost  model catalog loaded  providers=3 models=80
 ```
 
 Two lines matter. `watching model catalog files` confirms the files were found, and `model catalog loaded` confirms they parsed, with the provider and model counts it ended up with. A malformed file or a ConfigMap that mounted but did not load shows up here before anything reaches the metrics.
 
 > [!WARNING]
-> **Your catalog wins, but it is not the only one loaded.** The proxy watches two files: yours from the ConfigMap, and a shipped default at `/etc/agentgateway/catalog/model_catalog.json` supplied by the controller-generated `agentgateway-proxy-model-catalog` ConfigMap. So `providers=3 models=82` is the merged total, not what you wrote.
+> **Your catalog wins, but it is not the only one loaded.** The proxy watches two files: yours from the ConfigMap, and a shipped default at `/etc/agentgateway/catalog/model_catalog.json` supplied by the controller-generated `agentgateway-proxy-model-catalog` ConfigMap. So `providers=3 models=80` is the merged total, not what you wrote, and the number moves with the release.
 
 Precedence is settled. Setting an absurd rate in your ConfigMap and sending one request produces a cost that matches your rate exactly, so a model you define is priced from your file:
 
@@ -1980,7 +1980,7 @@ dev-admin@example.com,0.00297,5,0.037092
 The README carries the provenance you need if these numbers go anywhere near a bill: the exact time window, the scope and filters applied, the source dashboard URL, and the caveat that spend is computed from token counts against your configured prices and may not match the provider invoice.
 
 > [!NOTE]
-> `model-cost-catalog.csv` carries an `override` **column.** That is the audit for Step 11: every model the gateway can price, flagged by whether the rate came from your catalog or the shipped defaults. Note it exports 79 rows against `models=82` in the startup log, so the two counts do not tie exactly.
+> `model-cost-catalog.csv` carries an `override` **column.** That is the audit for Step 11: every model the gateway can price, flagged by whether the rate came from your catalog or the shipped defaults. Note it exports 79 rows against `models=80` in the startup log, so the two counts do not tie exactly.
 
 > [!WARNING]
 > **__unattributed__ means different things in different views.** In `spend-by-virtualKey` it is your JWT traffic, which has no `apiKey.id` by definition — those callers are fully identified, just not by a key, and a large bucket there is expected rather than a finding. In the user dimension the same word means the gateway could not resolve an identity at all, which is the governance problem described above. Same label, opposite meanings, same page.
@@ -3228,7 +3228,7 @@ curl -s http://localhost:8081/llm \
   -H "Authorization: Bearer ${ALLOWED_TOKEN}" -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4-6","max_tokens":5000,
        "messages":[{"role":"user","content":"Write a long story about a lighthouse."}]}' \
-  | jq '{stop_reason, output_tokens: .usage.output_tokens}'
+  | jq '{usage, choices: [.choices[] | {index, finish_reason}]}'
 ```
 
 **Verified on v2026.7.1, with the caller asking for 5,000:**
@@ -3236,17 +3236,26 @@ curl -s http://localhost:8081/llm \
 ```json
 {
   "usage": {
-    "prompt_tokens": 31,
+    "prompt_tokens": 50,
     "completion_tokens": 500,
-    "total_tokens": 531
+    "total_tokens": 550,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    },
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0
   },
   "choices": [
-    { "index": 0, "finish_reason": "length" }
+    {
+      "index": 0,
+      "finish_reason": "length"
+    }
   ]
 }
 ```
 
-The prompt was untouched at 31 tokens and only the completion was capped, at exactly the ceiling, with `finish_reason: "length"` rather than `"stop"` — the model ran out of room rather than finishing.
+The prompt was untouched at 50 tokens and only the completion was capped, at exactly the ceiling, with `finish_reason: "length"` rather than `"stop"` — the model ran out of room rather than finishing. The prompt count includes the system prompt injected in 17.1, which is still attached to the backend at this point.
 
 > [!WARNING]
 > **Read the response in OpenAI shape, not the provider’s.** The gateway normalises, so the fields are `choices[0].finish_reason` and `usage.completion_tokens`. Querying Anthropic’s native `stop_reason` and `usage.output_tokens` returns null for both, which looks exactly like a cap that did not apply.
