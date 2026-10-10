@@ -18,19 +18,18 @@
 # Nothing here changes anything: no resource is created, no port-forward is
 # started, no credential is written anywhere. It reads, and it asks.
 #
-# Two of these deserve their reasoning stated, because the obvious version of
-# each passes while the thing it checks is broken:
+# One of these deserves its reasoning stated, because the obvious version
+# passes while the thing it checks is broken:
 #
 #   A kubeconfig with a current context in it proves nothing. The context can
 #   name a cluster that is gone, and every kubectl in the build then fails one at
 #   a time, a hundred blocks deep. `kubectl get --raw /healthz` asks the
 #   apiserver itself, which is the only thing that can answer for it.
 #
-#   A well-known endpoint answers from a half-imported realm. Keycloak serves
-#   discovery as soon as the realm exists, before its clients, users and mappers
-#   are in place, so discovery answering is the first half of the check and a
-#   token for dev coming back is the other. The fetch runs the guide's own
-#   get_token, so what is checked is what the build will use.
+# Keycloak is not checked here. The guide deploys it into the cluster in Step
+# 6.1, so before a build there is nothing to check, and a check that fails on
+# every clean cluster is not a precondition. Whether a token comes back is
+# checked where it can be: waits.sh, after the block that forwards it.
 #
 # Exit status:
 #   0  every check passed, and you approved
@@ -126,17 +125,15 @@ echo "checks:"
 # --------------------------------------------------------------------------
 
 tools_missing=""
-for tool in kubectl helm jq curl docker; do
+for tool in kubectl helm jq curl; do
   command -v "$tool" >/dev/null 2>&1 || tools_missing="$tools_missing $tool"
 done
 
 if [ -z "$tools_missing" ]; then
-  ok_check "kubectl, helm, jq, curl and docker are on PATH"
+  ok_check "kubectl, helm, jq and curl are on PATH"
 else
   no_check "not on PATH:$tools_missing" \
-"install them. On macOS: brew install$tools_missing
-docker is only needed for the reference Keycloak in Attachment A. If your IdP
-is elsewhere, that is the one you can do without."
+"install them. On macOS: brew install$tools_missing"
 fi
 
 # --------------------------------------------------------------------------
@@ -172,8 +169,8 @@ fi
 # --------------------------------------------------------------------------
 # 3. The guide's environment, then your credentials over its placeholders
 #
-# The environment block has to run before Keycloak can be checked at all:
-# KEYCLOAK_URL, the realm, the client and its secret all come from it.
+# The environment block has to run before the ports can be checked: the
+# Keycloak port comes from KEYCLOAK_LOCAL_PORT in it.
 # --------------------------------------------------------------------------
 
 session_snapshot_credentials
@@ -198,59 +195,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 4. Keycloak, twice: discovery, and a token that actually comes back
-# --------------------------------------------------------------------------
-
-kc_url=${KEYCLOAK_URL:-}
-kc_realm=${KEYCLOAK_REALM:-}
-kc_client=${KEYCLOAK_CLIENT_ID:-unset}
-wellknown="$kc_url/realms/$kc_realm/.well-known/openid-configuration"
-
-if [ -z "$kc_url" ] || [ -z "$kc_realm" ]; then
-  no_check "KEYCLOAK_URL or KEYCLOAK_REALM is not set" \
-"both come from the guide's environment setup block, so fix that first."
-else
-  kc_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$wellknown" 2>/dev/null)
-  if [ "$kc_code" = 200 ]; then
-    ok_check "Keycloak discovery answers for realm $kc_realm"
-  else
-    no_check "Keycloak discovery returned ${kc_code:-nothing} from $wellknown" \
-"000 means nothing is listening: start it, or fix KEYCLOAK_URL.
-404 means the realm name is wrong.
-Attachment A stands one up in one command, and explains why the URL has to
-resolve identically from here and from inside the cluster."
-  fi
-
-  # The half-imported realm case. Discovery is served as soon as the realm
-  # exists; a token needs the client, the user, and the password grant enabled.
-  if session_eval_block "$SESSION_TOKEN_BLOCK" >"$tmp/token.out" 2>&1; then
-    case ${ALLOWED_TOKEN:-} in
-      *.*.*)
-        ok_check "a token for dev comes back, and it is a three part JWT"
-        ;;
-      ''|null)
-        no_check "no token for dev: get_token returned ${ALLOWED_TOKEN:-nothing}" \
-"discovery answers from a half-imported realm, which is what this catches.
-Check that client $kc_client exists with the secret in KEYCLOAK_CLIENT_SECRET,
-that user dev exists with password dev-password, and that the client has the
-password grant enabled. A.6 maps the Keycloak error strings to fixes.
---import-realm skips a realm that already exists, so a half-imported one has to
-be removed and recreated rather than restarted."
-        ;;
-      *)
-        no_check "what came back for dev is not a JWT: $(printf '%s' "${ALLOWED_TOKEN}" | cut -c1-40)" \
-"that is an error object rather than a token. Run the fetch without the
-jq filter to read what Keycloak actually said."
-        ;;
-    esac
-  else
-    no_check "the guide's token block would not run" \
-"$(tr '\n' ' ' <"$tmp/token.out" | cut -c1-140)"
-  fi
-fi
-
-# --------------------------------------------------------------------------
-# 5. Ports
+# 4. Ports
 #
 # Free is fine, and a forward that answers is fine. Everything else is either a
 # port the build cannot bind or one that answers as something other than the
@@ -258,6 +203,7 @@ fi
 # --------------------------------------------------------------------------
 
 for port in $(printf '%s' "$SESSION_PORTS"); do
+  port_ns=$(session_port_ns "$port")
   state=$(session_port_state "$port" "$(session_port_path "$port")")
   holder=other
   [ -n "$(session_port_forward_pids "$port")" ] && holder=forward
@@ -270,7 +216,7 @@ for port in $(printf '%s' "$SESSION_PORTS"); do
       ok_check "port $port is held by a forward, and it answers"
       ;;
     answering:other)
-      no_check "port $port answers, but not through a forward for $SESSION_FORWARD_NS" \
+      no_check "port $port answers, but not through a forward for $port_ns" \
 "something else is serving that port. Stop it, or change the ports
 consistently, which the guide's port table covers.
 lsof -nP -iTCP:$port -sTCP:LISTEN names what holds it."
@@ -279,7 +225,7 @@ lsof -nP -iTCP:$port -sTCP:LISTEN names what holds it."
       no_check "port $port is held by a forward that does not answer" \
 "a forward outlives the pod it points at, and keeps the port while it does.
 . auto-build/lib/session.sh replaces it, or
-pkill -f 'kubectl port-forward.*$SESSION_FORWARD_NS'"
+pkill -f 'kubectl port-forward.*$port_ns'"
       ;;
     blocked:other)
       no_check "port $port is held by something that is not a forward, and it does not answer" \
@@ -316,7 +262,7 @@ printf '  context     %s%s%s\n' "${SESSION_BOLD:-}" "$context" "${SESSION_RESET:
 printf '  apiserver   %s\n' "${apiserver:-unknown}"
 printf '  namespace   %s\n' "$SESSION_FORWARD_NS"
 printf '  guide       %s\n' "${SESSION_GUIDE##*/}"
-printf '  keycloak    %s, realm %s\n' "$kc_url" "$kc_realm"
+printf '  keycloak    deployed by the guide in Step 6.1, realm %s\n' "${KEYCLOAK_REALM:-unset}"
 echo
 echo "  credentials, by where they came from and how long they are. No value is"
 echo "  printed here, or anywhere else in these scripts:"

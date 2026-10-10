@@ -3,213 +3,78 @@
 > [!WARNING]
 > Lab and PoC only. Nothing in this attachment is safe for production, and the reasons are listed at the end so you can see exactly why.
 
-### A.0 The one thing that matters
-
-Read this before running anything, because every failure in this attachment is a violation of one sentence.
+### A.0 The issuer
 
 > [!WARNING]
-> Keycloak must be reachable at **one URL** that resolves identically from your laptop and from inside the cluster, and the `iss` claim in your tokens must match that URL exactly.
+> The `iss` claim in your tokens must match the `issuer` in the gateway policy exactly. The comparison is a string comparison with no normalization.
 
-Here is why. The gateway does two things with your IdP. It fetches signing keys from the JWKS endpoint, which happens **from inside the proxy pod**. And it compares the `iss` claim in each token against the `issuer` in your policy, which is a string comparison with no normalization. If you obtain a token through `localhost` on your laptop and configure the gateway with a cluster DNS name, the JWKS fetch works, the signature verifies, and the request is still rejected because two strings do not match.
+The gateway does two separate things with your IdP. It compares each token's `iss` claim against the policy's `issuer`, and it fetches signing keys through the backend from Step 6.3, from inside the proxy pod. The second never reads the first, so the issuer does not have to be an address anything can reach.
 
-The symptom is HTTP 401 while holding a token that decodes perfectly. It is the single most common way people fail this guide, and it looks like a gateway problem.
+Step 6.1 pins the issuer with `KC_HOSTNAME`, set to the in-cluster Service URL. Keycloak then writes that URL into every token whatever address the request came in on. You fetch tokens through a port-forward on `localhost`, the tokens say `http://keycloak.keycloak.svc.cluster.local:8080/realms/llm-platform`, and the policy is configured with the same string.
 
-### A.1 Recommended: Keycloak outside the cluster
+Without `KC_HOSTNAME`, Keycloak derives the issuer from the Host header of the request that produced the token. **Verified on 26.1.3:** with `KC_HOSTNAME` removed from the Deployment, a token fetched through the forward says `iss: http://localhost:8080/realms/llm-platform`. The policy says something else, and the result is HTTP 401 for a token that decodes cleanly.
 
-Run Keycloak as a container alongside the cluster rather than inside it. Two reasons, and the second is the better one.
+### A.1 What Step 6.1 deploys
 
-The practical reason is that it removes a whole class of problems and survives cluster rebuilds, which matters when you are testing and will nuke the cluster several times.
+A Deployment, a Service and a ConfigMap holding the realm, in the `keycloak` namespace. The settings that matter:
 
-The better reason is that it models production. Nobody runs their identity provider inside the same cluster as their AI gateway. An in-cluster IdP teaches a shape you would have to unlearn, and it quietly implies your IdP shares a blast radius with your data plane. Outside is both easier and more honest.
-
-**Get the realm definition.** Clone the reference repo, which you want anyway for the tested manifests:
-
-```bash run id=a-1-recommended-keycloak-outside
-git clone https://github.com/solo-io/deployment-guide-llm-consumption-on-k8s.git
-cd deployment-guide-llm-consumption-on-k8s
-```
-
-Two paths matter for this attachment:
-
-| Path | Used by |
+| Setting | Why |
 |---|---|
-| `infra/keycloak/local/realm.json` | The container path in A.1, mounted into Keycloak |
-| `infra/keycloak/k8s/keycloak.yaml` | The in-cluster path in A.3 |
+| `start-dev --import-realm` | Imports every file in `/opt/keycloak/data/import` at startup, which is where the ConfigMap is mounted. Dev mode stores data inside the container, so every new pod imports the realm afresh. |
+| `KC_HOSTNAME` | Pins the issuer. A.0. |
+| `KC_HOSTNAME_STRICT: "false"` | Accepts requests on hostnames other than `KC_HOSTNAME`, such as `localhost` through the port-forward. |
+| `KC_HTTP_ENABLED: "true"` | Plain HTTP. Lab only, A.7. |
+| `KC_BOOTSTRAP_ADMIN_USERNAME` and `_PASSWORD` | Creates a temporary `admin` user in the `master` realm. These replace `KEYCLOAK_ADMIN` and `KEYCLOAK_ADMIN_PASSWORD`, which are deprecated in Keycloak 26. **Verified on 26.1.3:** an `admin-cli` password grant against `master` returns a token. |
+| Readiness probe on the realm's discovery document | The Service sends traffic only to a Ready pod, and the pod is Ready only once the realm answers. |
 
-**Check the realm file exists and is a file.** Do not skip this. It takes one second and it prevents the failure described in A.1a.
+Keycloak imports the realm before it opens its HTTP listener. **Verified on 26.1.3:** the log reports `Import finished successfully` and then `Listening on: http://0.0.0.0:8080`, and a client polling through the Service saw its first token and first discovery response in the same second. A Ready pod therefore has the whole realm, not part of it.
 
-```bash run id=a-1-recommended-keycloak-outside-2
-REALM="$(pwd)/infra/keycloak/local/realm.json"
-[ -f "${REALM}" ] || { echo "NOT A FILE: ${REALM}"; ls -ld "${REALM}" 2>/dev/null; }
+Nothing here is specific to kind. The manifests use a ClusterIP Service and cluster DNS, which every conformant cluster has.
+
+### A.2 Checking both sides
+
+From your laptop, through the forward from 6.1. The issuer must be the in-cluster URL, not `localhost`:
+
+```bash run id=a-2-checking-both-sides-curl
+curl -sS "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration" \
+  | jq -r '.issuer'
 ```
 
-If that prints anything, stop and read A.1a before running Docker.
+From inside the cluster, which is the request the proxy makes when it fetches keys:
 
-**Start Keycloak on the cluster's Docker network:**
-
-```bash run id=a-1-recommended-keycloak-outside-3
-docker run -d --restart=always --name keycloak \
-  --network kind \
-  -p 127.0.0.1:8080:8080 \
-  -e KEYCLOAK_ADMIN=admin \
-  -e KEYCLOAK_ADMIN_PASSWORD=admin \
-  -e KC_HOSTNAME=http://keycloak:8080 \
-  -e KC_HTTP_ENABLED=true \
-  -e KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true \
-  -e KC_HOSTNAME_STRICT=false \
-  --mount type=bind,source="$(pwd)/infra/keycloak/local/realm.json",target=/opt/keycloak/data/import/realm.json,readonly \
-  quay.io/keycloak/keycloak:26.1.3 \
-  start-dev --import-realm
-```
-
-`KC_HOSTNAME` **is the line that matters most,** and not only because Keycloak refuses to start without it when `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` is true (see A.1a). Pinning the hostname makes the token issuer deterministic instead of derived from whichever Host header a caller happened to use, which is what removes the largest source of failure in this attachment. A.2 covers the consequence.
-
-`--network kind` is the part that makes this work. The container joins the same Docker bridge network as the kind nodes, so pods can reach it at `http://keycloak:8080` by container name, while your laptop reaches it at `127.0.0.1:8080`.
-
-Four things about that command:
-
-- `--network kind` **does not exist until a kind cluster does.** Docker creates that network with your first cluster. If you run this on a clean machine before creating a cluster you get `network kind not found`. Create the cluster first, or run `docker network create kind` defensively.
-- **Use** `--mount`**, not** `-v`**, and note the different syntax.** `--mount type=bind` fails with an error if the source path does not exist. `-v` silently creates a directory there instead, which is the failure in A.1a. Behavior is identical when the path is correct; the difference only shows up when you are already in trouble.
-- **The source path must be absolute.** `$(pwd)` expands to wherever your shell is, not the repo root, so run this from the top of the clone.
-- **Not all clusters are kind.** For k3d, minikube, or a managed cluster, the network flag changes but A.0 does not. Whatever you do, produce one URL that resolves from both sides.
-- `-v` **takes a file path, not a URL.** There is no import-from-URL option. If you would rather not clone the repo, `curl` the file down first and mount the local copy.
-- `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` **requires** `KC_HOSTNAME`**.** Keycloak 26 validates the pairing at startup and refuses to boot without it. Keycloak 24 ignored the option entirely, so a command carried over from 24.x starts there and crashloops on 26. See A.1a.
-- **Hostname options were reworked in Keycloak 25.** Anything carried over from a 24.x setup needs verifying against the version you are pinning rather than assumed to still be valid.
-> [!WARNING]
-> **On the admin variables.** The command above uses `KEYCLOAK_ADMIN` and `KEYCLOAK_ADMIN_PASSWORD` because that is what was tested and it works on 26.1.3. Keycloak 26 introduced `KC_BOOTSTRAP_ADMIN_USERNAME` and `KC_BOOTSTRAP_ADMIN_PASSWORD` as the current names, with the old pair deprecated but functional. Switching is the right move eventually. Verify it before you rely on it, because getting it wrong gives you a Keycloak with no admin user.
-
-### A.1a If Keycloak crashloops
-
-Two causes, both encountered while building this guide. Get the error message before doing anything else, and run it in the foreground so the failure prints in front of you:
-
-```bash
-docker rm -f keycloak
-# same command as A.1, but with --rm instead of -d --restart=always
-```
-
-#### Cause 1: an invalid hostname option combination
-
-```text
-ERROR: Failed to start quarkus
-ERROR: hostname-backchannel-dynamic must be set to false when no hostname is provided
-```
-
-Keycloak 26 validates option combinations at startup and exits. `hostname-backchannel-dynamic` is only valid when a hostname is provided, so it needs `KC_HOSTNAME` alongside it.
-
-**Why this looks like a version problem, and why downgrading is the wrong fix.** Keycloak 24 ignored the option and started fine, so an otherwise identical command works on 24 and crashloops on 26. That makes the version look guilty when the real issue is a configuration pairing that only 26 validates. Set `KC_HOSTNAME` as shown in A.1 rather than downgrading, because pinning the hostname is the better configuration anyway.
-
-The startup logs are unambiguous about this class of failure. If Keycloak dies in under a second with `ERROR: Failed to start quarkus`, it is a configuration validation error and the line underneath names the option.
-
-#### Cause 2: a bind mount pointed at a directory
-
-**Symptom.** Keycloak starts and exits repeatedly, with no realm imported, and downgrading appears to help.
-
-**Cause.** With a `-v` bind mount, if the host source path does not exist, the Docker daemon **creates it, as a directory**, because it cannot know whether you meant a file. So if you ran `docker run` before the realm file was in place, or from a working directory where `$(pwd)` did not resolve to the repo root, Docker created a directory named `realm.json`. Keycloak then mounts a directory where it expects a file, finds nothing importable, and exits.
-
-This is documented Docker behavior rather than a bug, which is why the command in A.1 uses `--mount` instead. `--mount` refuses to create a missing source path. Note that it will still happily bind a path of the wrong type, so a directory left behind by an earlier `-v` run continues to break things.
-
-**Confirm it.** Run all three, because they catch different mistakes:
-
-```text
-# Is it a directory? A leading d in the permissions means yes. Use -ld, not -la:
-# on a directory, ls -la lists the contents rather than the entry itself.
-ls -ld ./infra/keycloak/local/realm.json
-
-# Is the name what you think? -b escapes non-printing characters,
-# which catches a stray carriage return from a copied command or an editor.
-ls -lab ./infra/keycloak/local/
-
-# What did Docker actually mount? Brackets expose trailing whitespace.
-docker inspect keycloak --format '{{range .Mounts}}[{{.Source}}] type={{.Type}}{{"\n"}}{{end}}'
-```
-
-If the mount source is not the path you expected, you ran the command from the wrong working directory. That is the underlying mistake, and it is why the directory reappears after you delete it.
-
-**Fix it:**
-
-```bash
-docker rm -f keycloak
-sudo rm -rf ./infra/keycloak/local/realm.json   # daemon-created, so likely root-owned
-git checkout -- infra/keycloak/local/realm.json # or restore the file however you created it
-file ./infra/keycloak/local/realm.json          # must say JSON text, not directory
-```
-
-Then re-run the A.1 command **from the root of the clone**.
-
-> [!WARNING]
-> Docker created that directory as root, so a plain `rm -rf` may be denied. That is a useful confirming signal rather than a separate problem. And if an editor shows the path as a file while the terminal disagrees, trust `ls -ld`.
-
-### A.2 Making the issuer match
-
-The constraint from A.0 is that the `iss` claim in your tokens must exactly match the `issuer` configured in the gateway policy. There are two ways to satisfy it, and the command in A.1 takes the better one.
-
-**With** `KC_HOSTNAME` **pinned,** Keycloak builds the issuer from that value rather than deriving it from the request Host header. So every token carries `iss: http://keycloak:8080/realms/llm-platform` regardless of which address you fetched it from, and the gateway policy is configured with that same string. The proxy pod resolves `keycloak` through Docker's network DNS, so JWKS retrieval works from inside the cluster.
-
-```bash run id=a-2-making-the-issuer-match-env
-export KEYCLOAK_URL=http://keycloak:8080
-export KEYCLOAK_REALM=llm-platform
-```
-
-> [!WARNING]
-> **NEEDS VALIDATION.** Confirm two things, because together they decide whether the hosts entry below is required at all. First, that a token fetched from your laptop at `http://localhost:8080` comes back with `iss` set to `http://keycloak:8080/realms/llm-platform`. Second, that the admin console is still usable through `localhost:8080` with the hostname pinned. If the issuer is genuinely fixed, fetching tokens at `localhost` is fine, the hosts entry becomes optional, and this section gets shorter.
-
-**The hosts entry,** which you want anyway and which is mandatory if you did not pin the hostname:
-
-```text
-# /etc/hosts
-127.0.0.1 keycloak
-```
-
-With that in place you can use `http://keycloak:8080` consistently everywhere: in `KEYCLOAK_URL`, in the gateway policy, and when fetching tokens from your laptop. One name, resolving to the port-published container from your machine and through Docker's network DNS from inside the cluster. It also puts the admin console at the same address your tokens name, which is one less thing to hold in your head while debugging.
-
-Verify from your laptop:
-
-```bash run id=a-2-making-the-issuer-match-curl
-curl -s ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs | jq '.keys | length'
-```
-
-And from inside the cluster, which is the check that actually matters, because this is the request the proxy makes:
-
-```bash run id=a-2-making-the-issuer-match
-kubectl run -n agentgateway-system --rm -i --restart=Never jwks-check \
+```bash run id=a-2-checking-both-sides
+kubectl run -n agentgateway-system --rm -i --restart=Never --quiet jwks-check \
   --image=curlimages/curl:latest -- \
-  curl -s ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs
+  curl -sS ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs
 ```
 
-If the second one fails, the gateway cannot validate tokens no matter what else is correct. Fix it here rather than in Step 6.
+You should get JSON with a `keys` array. If the first prints a `localhost` issuer, `KC_HOSTNAME` is not set on the pod. If the second fails, the gateway cannot validate any token, whatever else is correct.
 
-**If you do not pin** `KC_HOSTNAME`**,** the issuer is derived from the Host header of whichever request produced the token. The hosts entry then stops being a convenience and becomes mandatory, because you have to fetch tokens using the same name the gateway is configured with or `iss` will not match. This is the configuration most people arrive at by accident, and it is the cause of the 401-with-a-valid-token failure in A.6.
+### A.3 The admin console
 
-### A.3 If you must run Keycloak in the cluster
+The console is not reachable through the port-forward. `http://localhost:8080/admin/` redirects to `KC_HOSTNAME`, which your laptop cannot resolve. Use `kcadm.sh` inside the pod instead:
 
-Sometimes outside is not practical. If you are developing against EKS or another managed cluster and standing up a host for Keycloak means a ticket, a VPC decision, and three days, that is a bad trade for a lab. Running it in the cluster is a legitimate choice, and the repo has a manifest for it:
-
-```bash
-kubectl apply -f infra/keycloak/k8s/keycloak.yaml
+```bash run id=a-3-the-admin-console when=manual
+kubectl exec -n ${KEYCLOAK_NAMESPACE} deploy/keycloak -- sh -c '
+  /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 \
+    --realm master --user admin --password admin --config /tmp/kcadm.config
+  /opt/keycloak/bin/kcadm.sh get clients -r llm-platform -q clientId=agentgateway-client \
+    --fields clientId,secret,directAccessGrantsEnabled --config /tmp/kcadm.config'
 ```
 
-It defines the same realm, the same client and mappers, and the same three users as the container path, so everything in A.4 applies unchanged.
-
-The same principle from A.0 applies and the same fix works. Because you will reach Keycloak through a port-forward, add a hosts entry for the in-cluster service name:
+**Verified on 26.1.3:**
 
 ```text
-# /etc/hosts
-127.0.0.1 keycloak.keycloak.svc.cluster.local
+[ {
+  "clientId" : "agentgateway-client",
+  "secret" : "agentgateway-client-secret",
+  "directAccessGrantsEnabled" : true
+} ]
 ```
-
-```bash
-kubectl port-forward svc/keycloak -n keycloak 8080:8080 &
-export KEYCLOAK_URL=http://keycloak.keycloak.svc.cluster.local:8080
-```
-
-**The ports have to match on both sides.** The proxy pod reaches Keycloak on the Service port, and your token request carries whatever port is in the URL you used. If you port-forward `8081:8080`, your tokens carry `iss` with `:8081` and the gateway is configured with `:8080`, and you are back to a 401 with a valid token.
-
-> [!WARNING]
-> **NEEDS VALIDATION.** Confirm on a clean cluster: the manifest needs a `Namespace` resource added (nothing currently creates `namespace: keycloak`, so `kubectl apply` fails), `KC_PROXY: edge` is deprecated in Keycloak 26 and should be removed, and confirm whether `KC_HOSTNAME_STRICT` and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` need setting explicitly or whether the `start-dev` defaults are sufficient.
 
 ### A.4 What the realm gives you
 
-You do not need to read this to continue, but you do need to read it to adapt it. Every block in `realm.json` exists for a reason the gateway cares about.
+You do not need to read this to continue, but you do need to read it to adapt it. Every block in `infra/keycloak/realm-export.json` exists for a reason the gateway cares about.
 
 **Realm** `llm-platform`**.** Keycloak also creates a `master` realm on startup for its own administration. agentgateway never uses it, and everything in this guide uses `llm-platform`.
 
@@ -288,18 +153,27 @@ Two groups rather than one is deliberate. `dev` proves authorization allows the 
 > [!WARNING]
 > **On group names in the import.** Plain names work: `"groups": ["developers"]` populates the claim as `["developers"]`, verified on Keycloak 26.1.3. You do not need a leading slash in the user entries, and `full.path: "false"` on the mapper is what keeps the slash out of the claim itself.
 
-**Editing the realm:** `--import-realm` does not overwrite a realm that already exists. If you change `realm.json` and restart, nothing happens. Remove and recreate the container to pick up changes:
+**Editing the realm:** the realm is imported from the ConfigMap when a Keycloak pod starts. Editing `realm-export.json` changes neither the ConfigMap nor the running pod. Re-run the ConfigMap block from Step 6.1, then replace the pod:
 
-```bash run id=a-4-what-the-realm-gives-you
-docker rm -f keycloak
-# then re-run the docker run command from A.1
+```bash run id=a-4-what-the-realm-gives-you when=manual
+kubectl rollout restart deployment/keycloak -n ${KEYCLOAK_NAMESPACE}
+kubectl rollout status deployment/keycloak -n ${KEYCLOAK_NAMESPACE} --timeout=420s
 ```
+
+**Verified on 26.1.3:** a replacement pod logs `Realm 'llm-platform' imported` again.
+
+> [!WARNING]
+> **After Keycloak restarts, fresh tokens fail and old ones work.** A new pod generates new signing keys. The gateway keeps the keys it already fetched until the policy's `cacheDuration` runs out, 5m in Step 6.4, so it rejects a token from the new pod with 401 and accepts one issued before the restart.
+>
+> **Verified on v2026.7.1:** after `kubectl rollout restart deployment/keycloak`, a freshly fetched token returned 401 on every check, every 15 seconds, until the check at 137 seconds returned 200. A token fetched before the restart still returned 200 after it. The upper bound is the configured `cacheDuration`; 137 seconds is one observation.
+>
+> So a 401 on a token you just fetched, straight after a realm edit, is the cache. Wait it out and retry before you look at the issuer or the policy.
 
 ### A.5 Get your tokens
 
 ```bash run id=a-5-get-your-tokens-env
 export ALLOWED_TOKEN=$(curl -s \
-  -X POST "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
+  -X POST "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=password" \
   -d "client_id=agentgateway-client" \
@@ -308,7 +182,7 @@ export ALLOWED_TOKEN=$(curl -s \
   | jq -r '.access_token')
 
 export DENIED_TOKEN=$(curl -s \
-  -X POST "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
+  -X POST "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=password" \
   -d "client_id=agentgateway-client" \
@@ -338,7 +212,7 @@ Worth knowing that the two behave differently when the padding is missing. GNU `
 If either token comes back `null`, drop the `jq -r '.access_token'` filter and read the error object. Keycloak names the problem precisely, and the A.6 table maps the common ones to fixes. `.well-known/openid-configuration` is also worth a look, since it confirms the realm imported and shows you the issuer Keycloak is actually advertising:
 
 ```bash run id=a-5-get-your-tokens-curl
-curl -s ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration | jq '{issuer, grant_types_supported}'
+curl -sS http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration | jq '{issuer, grant_types_supported}'
 ```
 
 Confirm before you leave this attachment:
@@ -354,11 +228,11 @@ Confirm before you leave this attachment:
 get_token() {
   local user="${1:?usage: get_token <username> [password]}"
   local pass="${2:-${user}-password}"
-  : "${KEYCLOAK_URL:?not set. See Environment setup.}"
+  : "${KEYCLOAK_LOCAL_PORT:?not set. See Environment setup.}"
   : "${KEYCLOAK_REALM:?not set. See Environment setup.}"
   : "${KEYCLOAK_CLIENT_ID:?not set. See Environment setup.}"
   : "${KEYCLOAK_CLIENT_SECRET:?not set. See Environment setup.}"
-  curl -s -X POST "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
+  curl -s -X POST "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=password" \
     -d "client_id=${KEYCLOAK_CLIENT_ID}" \
@@ -374,13 +248,13 @@ export DENIED_TOKEN=$(get_token agent)
 
 The password defaults to `<username>-password`, which is this realm's convention, and takes an explicit second argument for anything else: `get_token alice 's3cret'`. The client ID and secret come from `KEYCLOAK_CLIENT_ID` and `KEYCLOAK_CLIENT_SECRET` in Environment setup, so the helper works against any Keycloak realm rather than only this one.
 
-**Confirm the lifespan actually took effect,** because it will not have if the container was restarted rather than removed:
+**Confirm the lifespan actually took effect,** because a realm edit does nothing until a new pod imports it:
 
 ```text
 decode_jwt "${ALLOWED_TOKEN}" | jq '.exp - .iat'
 ```
 
-`3600` means the realm change is live. `300` means you are still on Keycloak's default, so remove the container and recreate it: `--import-realm` skips a realm that already exists, so restarting changes nothing.
+`3600` means the realm change is live. `300` means you are still on Keycloak's default: update the ConfigMap and replace the pod, as A.4 describes.
 
 > [!WARNING]
 > **An empty variable decodes to nothing at all.** If `decode_jwt` prints no output, the token variable is empty, which means the fetch failed rather than the decode. The helper above returns an error in that case rather than staying silent, because a blank response is easy to read as success when you are working through several of these.
@@ -392,28 +266,24 @@ decode_jwt "${ALLOWED_TOKEN}" | jq '.exp - .iat'
 | Symptom | Cause | Fix |
 |---|---|---|
 | 401 with a token that decodes fine | `iss` does not match the policy `issuer` | Decode the token, compare the two strings character by character including the port. See A.0 and A.2. |
-| JWKS check fails from inside the cluster | The URL is not resolvable from the pod | A.2. Test with the in-cluster curl, not from your laptop. |
-| `network kind not found` | No kind cluster yet | Create the cluster, or `docker network create kind` |
-| Crashloop, `hostname-backchannel-dynamic must be set to false when no hostname is provided` | `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` set without `KC_HOSTNAME`. Keycloak 26 validates the pairing, 24 ignored it. | Set `KC_HOSTNAME`. A.1a cause 1. Do not downgrade. |
-| Crashloop that works on Keycloak 24 and fails on 26 | Almost always a configuration pairing only 26 validates, not a version incompatibility | Run in the foreground and read the error. A.1a. |
-| Crashloop with no realm imported | `-v` created a **directory** at the realm.json path because the file did not exist when first run | A.1a cause 2. Remove the directory, restore the file, use `--mount`. |
-| The directory keeps coming back after you delete it | You are running from a working directory where `$(pwd)` does not resolve to the repo root, so Docker creates the path again | `docker inspect` the mount source and compare to `pwd`. Run from the root of the clone. |
-| Cannot delete the directory without sudo | Docker's daemon created it as root | Expected. Confirms the diagnosis. |
-| Keycloak starts with no realm | Same cause as above, or a relative volume path treated as a named volume | `ls -ld` the path, then A.1a |
-| Editor shows a file, terminal shows a directory | Cached editor view over a Docker-created directory | Trust `ls -ld`. Create the file from a terminal. |
-| Realm changes have no effect | `--import-realm` does not overwrite | `docker rm -f keycloak` and recreate |
-| `invalid_grant`, `Account is not fully set up` | User is missing `firstName`, `lastName`, `email`, or has a pending required action. Newer Keycloak requires them by default. | Add the profile fields and `emailVerified: true` with empty `requiredActions`, then recreate the container |
-| `unauthorized_client` or `invalid_client` | The client secret did not survive the import | `kcadm.sh get clients -r llm-platform --fields clientId,secret` |
+| **401 for a token you just fetched, while an older token still works** | Keycloak restarted. The new pod signs with new keys, and the gateway keeps the old ones until `cacheDuration` runs out, 5m in Step 6.4 | Wait, then retry. Observed on v2026.7.1: 401 until 137 seconds after the restart, then 200. A.4. |
+| JWKS check fails from inside the cluster | The Keycloak Service is not there, or the pod is not Ready | A.2. `kubectl get pods,svc -n keycloak`. Test with the in-cluster curl, not from your laptop. |
+| Token `iss` says `localhost` | `KC_HOSTNAME` is not set on the pod | A.0. Check the Deployment's env, then fetch a new token. |
+| `Failed to connect to localhost port 8080` when fetching a token | The Keycloak port-forward is down | Re-run the forward block in Step 6.1 |
+| Pod not Ready after several minutes | The readiness probe asks for the realm's discovery document, so a realm that failed to import keeps it unready | `kubectl logs deploy/keycloak -n keycloak` and look for the import lines |
+| Realm changes have no effect | The ConfigMap was not updated, or the pod was not replaced | Re-run the ConfigMap block, then `kubectl rollout restart deployment/keycloak -n keycloak`. A.4. |
+| `invalid_grant`, `Account is not fully set up` | User is missing `firstName`, `lastName`, `email`, or has a pending required action. Newer Keycloak requires them by default. | Add the profile fields and `emailVerified: true` with empty `requiredActions`, then replace the pod as in A.4 |
+| `unauthorized_client` or `invalid_client` | The client secret did not survive the import | The `kcadm.sh` command in A.3 |
 | `unsupported_grant_type` | `directAccessGrantsEnabled` is not actually on | Check the imported client rather than the JSON |
-| `Realm does not exist` | Import was skipped because a partial realm persisted in the container's store | `docker rm -f keycloak` and recreate. Restarting is not enough. |
+| `Realm does not exist` | The realm name in the ConfigMap differs from `KEYCLOAK_REALM`, or the import failed | `kubectl logs deploy/keycloak -n keycloak` |
 | `decode_jwt` prints nothing | The token variable is empty. The fetch failed, not the decode. | Re-run `get_token` and check the response for an error object |
-| `get_token dev-admin` fails | Password convention mismatch if the realm still has `admin-password` | Realm passwords are `<username>-password`. Update `realm.json`. |
+| `get_token dev-admin` fails | Password convention mismatch if the realm still has `admin-password` | Realm passwords are `<username>-password`. Update `realm-export.json`, then A.4. |
 | `jq: parse error: Unfinished string at EOF` when decoding a token | `base64 -d` cannot handle unpadded base64url. The token is fine. | Use the `decode_jwt` helper in A.5 |
 | A decoded token looks complete but ends mid-value, with no error | BSD `base64` on macOS silently drops the incomplete final group | Same fix. The claims are readable but the JSON is invalid, so anything piping to `jq` fails. |
 | 401 with `Error(ExpiredSignature)` in the message | Access token expired. Default lifespan is five minutes. | Re-run `get_token`. The gateway names this specifically, so no diagnosis is needed. |
-| `exp - iat` still reports 300 after adding `accessTokenLifespan` | `--import-realm` skips a realm that already exists, so a restart changes nothing | `docker rm -f keycloak` and recreate. Restarting is not enough. |
+| `exp - iat` still reports 300 after adding `accessTokenLifespan` | The running pod imported the realm before the edit | Update the ConfigMap and replace the pod. A.4. |
 | Authorization denies a caller who should pass | `groups` claim missing, or has a leading slash | Check the groups mapper and `full.path` |
-| Everything worked yesterday, cluster was rebuilt | Nothing, that is the point of running Keycloak outside | Confirm the container is still up: `docker ps` |
+| Everything worked yesterday, cluster was rebuilt | Keycloak went with the cluster | Re-run Step 6.1. The realm is imported again and tokens fetched before it are invalid. |
 
 ### A.7 Why this is lab-only
 
@@ -421,11 +291,11 @@ Not a disclaimer, a list, so you can see what would need to change:
 
 - `admin`/`admin` credentials, and user passwords in a file
 - No TLS anywhere, `KC_HTTP_ENABLED=true`
-- The hostname is pinned to a plain HTTP address on a Docker bridge network, with `KC_HOSTNAME_STRICT=false`. Production pins a real hostname over TLS.
-- `start-dev` uses an in-memory-class local store. It survives container restarts and cluster rebuilds, but not `docker rm`.
-- `--restart=always` means this comes back after a reboot and sits there indefinitely with weak credentials. Remove it when you are done.
+- The hostname is pinned to a plain HTTP in-cluster address, with `KC_HOSTNAME_STRICT=false`. Production pins a real hostname over TLS.
+- `start-dev` stores data inside the container. Every new pod starts from the realm file, so nothing changed through the admin API survives the pod being replaced.
+- One replica, no persistent storage, and an IdP that shares a cluster and a blast radius with the gateway it authenticates for. Production runs the IdP separately.
 > [!WARNING]
-> ↩ **Return to Step 6.1.** Your IdP is ready and your tokens are in `ALLOWED_TOKEN` and `DENIED_TOKEN`.
+> ↩ **Return to Step 6.2.**
 
 ## Attachment B: Using your own IdP
 

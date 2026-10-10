@@ -52,7 +52,7 @@ top of the guide and in the release notes.
 | A Solo Enterprise licence key | Contact your Solo account team |
 | An Anthropic API key | The reference provider. Others are covered in Attachment C |
 | An OpenAI API key | For the content moderation guardrail in Step 8.3 only |
-| An identity provider | Keycloak setup for a lab is in Attachment A |
+| An identity provider | Step 6.1 deploys the reference Keycloak into the cluster. Attachment B covers your own. |
 
 ---
 
@@ -61,8 +61,9 @@ top of the guide and in the release notes.
 Read [`docs/deployment-guide-keycloak.md`](docs/deployment-guide-keycloak.md) from the top. It is written to be run
 in order, and each step verifies before the next depends on it.
 
-If you do not already have an identity provider to test against, start with **Attachment A** in
-[`docs/attachments.md`](docs/attachments.md), which stands up Keycloak with a prepared realm.
+If you do not already have an identity provider to test against, Step 6.1 deploys Keycloak into the
+cluster with a prepared realm. **Attachment A** in [`docs/attachments.md`](docs/attachments.md)
+describes that realm and how to troubleshoot it.
 
 ### Or build it automatically
 
@@ -86,9 +87,9 @@ docs/
   attachments.md           Optional branches: IdPs, other providers, observability, guardrails
   images/                  Architecture diagram and dashboard screenshots
 infra/
-  keycloak/                Realm definition and manifests, used directly by Attachment A
+  keycloak/                The realm Step 6.1 imports, realm-export.json
 auto-build/
-  preflight.sh             Checks tooling, cluster context, credentials and IdP before building
+  preflight.sh             Checks tooling, cluster context, credentials and ports before building
   up.sh                    Builds the environment by running the guide end to end
   verify.sh                Asserts every control is in place and enforcing
   down.sh                  Tears the environment down

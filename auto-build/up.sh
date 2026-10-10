@@ -29,7 +29,8 @@
 #
 # `--from` also re-runs a prelude, because a block halfway through the guide
 # expects shell state that earlier blocks created: the `forwards`, `get_token`
-# and `decode_jwt` helpers. The prelude is the blocks that define those. It
+# and `decode_jwt` helpers. The prelude is the blocks that define those, plus
+# 6.1's Keycloak forward, because the token block calls get_token through it. It
 # does not include 12.2's traffic generator, which defines `send_traffic` and
 # then calls it five times against your provider.
 #
@@ -103,7 +104,10 @@ SESSION_DEFS_ONLY=1
 
 ENV_FILE=$SESSION_ENV_FILE
 ENV_BLOCK=$SESSION_ENV_BLOCK
-PRELUDE=$SESSION_HELPER_BLOCKS
+# The helper blocks, with the Keycloak forward ahead of the token block that
+# needs it. Order here does not matter to the run, which goes in guide order.
+PRELUDE="$SESSION_HELPER_BLOCKS
+6-1-deploy-the-reference-identity-provider-forward"
 CREDENTIALS=$SESSION_CREDENTIALS
 FORWARD_NS=$SESSION_FORWARD_NS
 
@@ -636,7 +640,7 @@ if [ "$pf_status" -ne 0 ]; then
 fi
 
 # A previous run that failed, or was interrupted, or rolled the proxy pod, leaves
-# forwards holding 8081, 15020 and 4000.
+# forwards holding 8081, 15020, 4000 and the Keycloak port.
 echo
 RUN_STARTED=true
 session_kill_forwards 1

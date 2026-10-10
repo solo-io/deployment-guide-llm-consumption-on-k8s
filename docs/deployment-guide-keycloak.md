@@ -94,12 +94,18 @@ export LLM_FALLBACK_MODEL=claude-haiku-4-5
 # and Attachment E covers Bedrock Guardrails, Model Armor, Purview DLP and webhooks.
 export OPENAI_API_KEY='<your-openai-api-key>'
 
-# Identity provider. Keycloak is the reference implementation.
-# See Attachment A if you need to stand one up.
-export KEYCLOAK_URL=http://keycloak:8080
+# Identity provider. Keycloak is the reference implementation, deployed in
+# Step 6.1. KEYCLOAK_URL is the in-cluster Service URL on purpose: it is what
+# lands in the token's iss claim, and Step 6.1 explains why.
+export KEYCLOAK_NAMESPACE=keycloak
+export KEYCLOAK_URL=http://keycloak.keycloak.svc.cluster.local:8080
 export KEYCLOAK_REALM=llm-platform
 export KEYCLOAK_CLIENT_ID=agentgateway-client
 export KEYCLOAK_CLIENT_SECRET=agentgateway-client-secret
+
+# The local port the Keycloak port-forward binds. Set it before running anything
+# if something already holds 8080, and everything below follows.
+export KEYCLOAK_LOCAL_PORT=${KEYCLOAK_LOCAL_PORT:-8080}
 
 # The IdP group allowed to reach the model.
 # This MUST match a value in the groups claim of your token, exactly, including case.
@@ -113,18 +119,17 @@ export LLM_ALLOWED_GROUP=developers
 | A Kubernetes cluster | Everything | Any conformant cluster. kind is fine and is what the lab assumes. |
 | Solo Enterprise license key | Step 1 | Contact your Solo account team |
 | An Anthropic API key | Step 2 onward | Or another provider, see Attachment C |
-| An identity provider | Step 6 onward | Attachment A stands one up in one command |
+| An identity provider | Step 6 onward | Step 6.1 deploys the reference Keycloak into the cluster. Attachment B covers your own. |
 | An OpenAI API key | Step 8, **optional** | Only for the OpenAI Moderation guardrail. The regex layer needs nothing, and Attachment E has alternatives. |
 | `kubectl`, `helm`, `jq`, `curl` | Everything |  |
 | `agctl` | Step 11, **optional** | Convenience for generating a cost catalog. It is experimental and not supported for production, and the catalog is plain JSON you can write yourself. Install steps are in Step 11.1. |
 | A metrics backend | **Optional** | Nothing in this guide requires Prometheus. Attachment D covers collection and alerting if you want the telemetry in a stack you already run. |
-| Docker | Attachment A | Only if you run the reference Keycloak |
 
 Two of the variables above need your attention rather than a copy-paste.
 
-`KEYCLOAK_URL` must be a URL that resolves **identically from your laptop and from inside the cluster**, and your tokens' `iss` claim must match it exactly. Attachment A explains why and how. This is the most common single cause of a working setup returning 401.
+`KEYCLOAK_URL` must match your tokens' `iss` claim exactly, because the gateway compares the two as strings. For the reference Keycloak it is the in-cluster Service URL, which your laptop cannot resolve and does not need to: you fetch tokens through a port-forward on `KEYCLOAK_LOCAL_PORT`, and Step 6.1 pins the issuer so the claim does not change with the address you used. A mismatch here is the most common single cause of a working setup returning 401.
 
-`LLM_ALLOWED_GROUP` must match your own IdP. The reference value `developers` comes from the Attachment A realm. If you are using your own IdP, set it to a group that actually appears in your tokens.
+`LLM_ALLOWED_GROUP` must match your own IdP. The reference value `developers` comes from the reference realm, described in Attachment A. If you are using your own IdP, set it to a group that actually appears in your tokens.
 
 > [!WARNING]
 > Use `curl -sS` rather than `curl -s` **throughout this guide.** Every read in these steps goes through a port-forward, and a port-forward that has died prints nothing and exits 7. An empty result then looks identical to a masked value, an absent metric or a clean pass. `-S` keeps curl quiet on success and makes it say so on failure. A rollout restart is the usual cause: the old forward does not die with the pod, it lingers holding the local port so a replacement cannot bind, and requests go to a dead endpoint.
@@ -135,12 +140,12 @@ Two of the variables above need your attention rather than a copy-paste.
 
 | **Port** | **What** |
 |---|---|
-| 8080 | Keycloak, on your laptop |
+| 8080 | Keycloak, port-forwarded, from Step 6.1. `KEYCLOAK_LOCAL_PORT` moves it if something already holds 8080. |
 | 8081 | agentgateway proxy, port-forwarded. `/llm` for people, `/llm-svc` for machine callers from Step 13. |
 | 4000 | Solo UI, port-forwarded |
 | 15020 | agentgateway proxy metrics, port-forwarded |
 
-If you already have something on these, change them consistently. The gateway and Keycloak in particular cannot share a port, and a port mismatch between where you fetch tokens and where the gateway validates them will cause failures that look like authentication problems.
+If you already have something on these, change them consistently.
 
 **Two kinds of change, and only one of them restarts anything:**
 
@@ -582,7 +587,7 @@ The reason this comes before Observe is not sequencing preference. Without verif
 **What you will have that you did not have before:** a request that cannot reach your provider without a verified caller attached to it.
 
 > [!WARNING]
-> **Identity provider.** Keycloak is the reference implementation. If you need to stand one up for a lab or PoC, Attachment A does it in one command and explains the one configuration detail that catches everyone. If you are using Okta, Entra ID, or Auth0 in production, Attachment B has the configuration delta and the settings to change in a realm you already have.
+> **Identity provider.** Keycloak is the reference implementation, and Step 6.1 deploys it into the cluster for a lab or PoC. If you are using Okta, Entra ID, or Auth0 in production, Attachment B has the configuration delta and the settings to change in a realm you already have.
 
 ### Step 6: Authenticate callers with JWT
 
@@ -590,18 +595,118 @@ Right now anyone who can reach the gateway can call your provider on your key. N
 
 agentgateway validates JWTs at the gateway layer. Every request has to carry a valid bearer token from your IdP, and requests without one are rejected before the provider is contacted, so they cost nothing.
 
-#### 6.1 Confirm your IdP is reachable and note the exact issuer URL
+#### 6.1 Deploy the reference identity provider
 
-```bash run id=6-1-confirm-your-idp-is-reachable-curl
-curl ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/certs
+**If you are using your own IdP, skip to 6.2.** Attachment B has the configuration for Okta, Entra ID and Auth0.
+
+The reference is Keycloak, running in the cluster with a prepared realm: three users, two groups, and the mappers the gateway needs. Attachment A describes what the realm contains and why. The realm export is in this repository at `infra/keycloak/realm-export.json`, and the block below finds it with `git rev-parse --show-toplevel`, so it works from any directory inside the clone.
+
+```bash run id=configmap-keycloak-realm
+kubectl create namespace ${KEYCLOAK_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create configmap keycloak-realm -n ${KEYCLOAK_NAMESPACE} \
+  --from-file=realm.json="$(git rev-parse --show-toplevel)/infra/keycloak/realm-export.json" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-You should get JSON with a `keys` array. A 404 means the realm name is wrong. A timeout or connection refused means the URL is not reachable, and if it is reachable from your laptop but not from the cluster you have the problem Attachment A exists to solve.
+```bash run id=deployment-keycloak
+kubectl apply -f- <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: ${KEYCLOAK_NAMESPACE}
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              value: admin
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME
+              value: "${KEYCLOAK_URL}"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /realms/${KEYCLOAK_REALM}/.well-known/openid-configuration
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 40
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: ${KEYCLOAK_NAMESPACE}
+  labels:
+    app: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+EOF
+```
 
-**This constraint** causes more failed setups than everything else in this guide combined:
+The readiness probe asks for the realm's discovery document rather than the port. Keycloak imports the realm before it starts listening, so a pod that reports Ready has a complete realm behind it, and the Service sends nothing to it before then.
 
 > [!WARNING]
-> The URL in `KEYCLOAK_URL` has to resolve identically from your laptop and from inside the cluster, and the `iss` claim in your tokens has to match it exactly. The gateway fetches signing keys from that URL and compares it to the `iss` claim in every token. If you obtain a token through one hostname and configure the gateway with another, you will get HTTP 401 while holding a token that decodes perfectly.
+> **`KC_HOSTNAME` decides whether authentication works.** Keycloak writes that value into every token's `iss` claim, and the gateway rejects a token whose `iss` does not exactly match the `issuer` in its policy. Setting it to the in-cluster Service URL makes the claim, the policy in 6.4 and the key fetch in 6.3 agree.
+>
+> So you fetch tokens through a port-forward on `localhost` and the tokens say `keycloak.keycloak.svc.cluster.local`. `iss` is an identifier, not an address anyone dereferences: the gateway fetches keys through the backend in 6.3, not from `iss`. **Verified on v2026.7.1 with Keycloak 26.1.3:** a token fetched at `http://localhost:8080` carries `iss: http://keycloak.keycloak.svc.cluster.local:8080/realms/llm-platform`.
+>
+> If you meet a 401 with a token that decodes cleanly, compare its `iss` with the policy's `issuer` character by character.
+
+Port-forward Keycloak so you can fetch tokens from your laptop, and confirm the realm is served:
+
+```bash run id=6-1-deploy-the-reference-identity-provider-forward
+kubectl rollout status deployment/keycloak -n ${KEYCLOAK_NAMESPACE} --timeout=420s
+pkill -f "kubectl port-forward.*${KEYCLOAK_NAMESPACE}" 2>/dev/null || true
+kubectl port-forward svc/keycloak -n ${KEYCLOAK_NAMESPACE} ${KEYCLOAK_LOCAL_PORT}:8080 >/dev/null 2>&1 &
+sleep 4
+curl -sS "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration" \
+  | jq -r '.issuer'
+```
+
+**Verified on v2026.7.1:**
+
+```text
+http://keycloak.keycloak.svc.cluster.local:8080/realms/llm-platform
+```
+
+That is the issuer every token will carry, and the value `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}` has to equal. A 404 means the realm name is wrong. `Failed to connect` means the forward is not up: re-run the block.
+
+The `forwards` helper does not touch this forward. It lives in its own namespace and the Keycloak pod does not roll when the gateway does.
 
 #### 6.2 Get two tokens and look at them
 
@@ -623,17 +728,17 @@ export ALLOWED_TOKEN='<a token for a caller in your allowed group>'
 export DENIED_TOKEN='<a token for a caller in a different group>'
 ```
 
-**If you are using the reference Keycloak from Attachment A,** this helper fetches them. It is specific to a Keycloak realm using the password grant, so treat it as lab convenience rather than something to carry into production:
+**If you are using the reference Keycloak from 6.1,** this helper fetches them through the port-forward. It is specific to a Keycloak realm using the password grant, so treat it as lab convenience rather than something to carry into production:
 
 ```bash run id=6-2-get-two-tokens-and-look-at
 get_token() {
   local user="${1:?usage: get_token <username> [password]}"
   local pass="${2:-${user}-password}"
-  : "${KEYCLOAK_URL:?not set. See Environment setup.}"
+  : "${KEYCLOAK_LOCAL_PORT:?not set. See Environment setup.}"
   : "${KEYCLOAK_REALM:?not set. See Environment setup.}"
   : "${KEYCLOAK_CLIENT_ID:?not set. See Environment setup.}"
   : "${KEYCLOAK_CLIENT_SECRET:?not set. See Environment setup.}"
-  curl -s -X POST "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
+  curl -s -X POST "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=password" \
     -d "client_id=${KEYCLOAK_CLIENT_ID}" \
@@ -700,16 +805,13 @@ status: 401
 > [!WARNING]
 > `ExpiredSignature` means exactly what it says, and it distinguishes an expired token from a wrong issuer or audience. **If you see it, refresh your tokens rather than debugging anything.**
 >
-> Check what you have with `decode_jwt "${ALLOWED_TOKEN}" | jq '.exp - .iat'`. The reference realm in Attachment A raises this to 3600 for lab use. If it reports 300 rather than 3600, the change is not applied: `--import-realm` skips a realm that already exists, so the container has to be removed and recreated rather than restarted.
+> Check what you have with `decode_jwt "${ALLOWED_TOKEN}" | jq '.exp - .iat'`. The reference realm in Attachment A raises this to 3600 for lab use. If it reports 300 rather than 3600, the change is not applied. The realm is imported when the Keycloak pod starts, so a realm edit needs the ConfigMap updated and a new pod: `kubectl rollout restart deployment/keycloak -n ${KEYCLOAK_NAMESPACE}`.
 
 #### 6.3 Give the gateway a way to reach your IdP
 
-The proxy fetches signing keys itself, and it does that through an agentgateway backend rather than a raw URL. So an out-of-cluster IdP needs a backend declaring where it lives.
+The proxy fetches signing keys itself, and it does that through an agentgateway backend rather than a raw URL. The backend declares where the IdP lives, as the proxy pod resolves it.
 
 ```bash run id=backend-keycloak
-KC_IP=$(docker inspect keycloak --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
-echo "Keycloak at ${KC_IP}"
-
 kubectl apply -f- <<EOF
 apiVersion: enterpriseagentgateway.solo.io/v1alpha1
 kind: EnterpriseAgentgatewayBackend
@@ -718,15 +820,12 @@ metadata:
   namespace: agentgateway-system
 spec:
   static:
-    host: ${KC_IP}
+    host: keycloak.${KEYCLOAK_NAMESPACE}.svc.cluster.local
     port: 8080
 EOF
 ```
 
-> [!WARNING]
-> **Edit before you run this.** The `docker inspect` line is specific to the lab setup in Attachment A, where Keycloak runs as a container on the kind network. For any other topology, set `host` to whatever address resolves your IdP **from inside the cluster**: a Service DNS name for an in-cluster IdP, or a hostname for a public one. See Attachment B for public IdPs, which also need TLS.
-
-An IP address is used here rather than the name `keycloak`, deliberately. The kind nodes can resolve container names through Docker's embedded DNS, but pods resolve through CoreDNS, and whether that reaches Docker's resolver is not something to depend on. The IP always works.
+For your own IdP, set `host` and `port` to whatever resolves it **from inside the cluster**. Attachment B covers public IdPs, which also need TLS.
 
 #### 6.4 Apply the JWT authentication policy
 
@@ -770,7 +869,7 @@ What each part does:
 - `location` is where the token is read from. A header with a prefix here, but a cookie, a query parameter, or a CEL expression are all available.
 - `issuer` is compared against the token's `iss` claim as an exact string. Nothing is fetched from it.
 - `audiences` must include a value from the token's `aud` claim.
-- `jwks.remote` is where keys are actually fetched, through the backend from 6.3 plus a path. **This is a separate concern from** `issuer`**,** which is what allows an IdP addressed by IP to issue tokens claiming a hostname. If you would rather not fetch at all, `jwks.inline` takes the key material directly.
+- `jwks.remote` is where keys are actually fetched, through the backend from 6.3 plus a path. **This is a separate concern from** `issuer`**,** so the issuer string never has to be resolvable from where it is compared. If you would rather not fetch at all, `jwks.inline` takes the key material directly.
 - `cacheDuration` controls how often keys are refreshed.
 > [!WARNING]
 > **Introducing authentication without breaking existing callers.** `mode: Strict` is a hard cutover: every request without a valid token starts failing the moment you apply it. That is what you want in this walkthrough and rarely what you want in production, where traffic is already flowing. `Permissive` and `Optional` let you turn authentication on and observe which callers are not yet sending tokens before you start rejecting them. If you are rolling this out to a live platform, start there, watch your audit logs from Step 9, and switch to `Strict` when the unauthenticated traffic has gone to zero. It is the same audit-then-enforce pattern used for budgets in Step 14, and for the same reason.
@@ -3327,7 +3426,7 @@ export DENIED_TOKEN=$(get_token agent)
 > [!WARNING]
 > **A 401 where you expect a 403 is always a token problem, never a policy problem.** The two mean different things and cannot both occur. 401 means authentication failed: the gateway could not establish who you are. 403 means authorization failed: it knows who you are and denies you. Because JWT validation runs earlier in the filter chain than authorization, an invalid token short-circuits before any policy decision is reached.
 >
-> So if the wrong-group check below returns 401 rather than 403, your token has expired or was signed by a realm that no longer exists, which happens every time you recreate the Keycloak container. Re-fetch and re-run rather than looking at your authorization policy.
+> So if the wrong-group check below returns 401 rather than 403, your token has expired, or the Keycloak pod was replaced. A new pod imports the realm with new signing keys, and the gateway keeps the keys it fetched for the policy's `cacheDuration`, 5m in 6.4. Until it refetches, a token from the new pod is rejected. **Verified on v2026.7.1:** after a Keycloak rollout restart, a fresh token returned 401 for two minutes and 200 at 137 seconds, while a token issued before the restart kept returning 200. Re-fetch, wait out the cache if Keycloak was restarted, and re-run rather than looking at your authorization policy.
 
 ```bash run id=secure-curl
 # No token

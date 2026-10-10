@@ -3,22 +3,24 @@
 # Removes what the guide created, and nothing else.
 #
 # Usage:
-#   ./down.sh                  the namespace, the Helm releases, the forwards
+#   ./down.sh                  both namespaces, the Helm releases, the forwards
 #   ./down.sh --approve        do not stop to confirm the cluster first
 #   ./down.sh --dry-run        say what would go, remove nothing
 #   ./down.sh --crds           also the CRDs
-#   ./down.sh --keycloak       also the Attachment A container
 #   ./down.sh --cluster        also the kind cluster
 #   ./down.sh --all            all of the above
 #
 # What it removes by default:
 #
-#   1. Port-forwards for the namespace. First, because they point at things that
-#      are about to stop existing.
+#   1. Port-forwards for both namespaces. First, because they point at things
+#      that are about to stop existing.
 #   2. The resources the guide created in the namespace, while the controller is
 #      still running to process their finalizers.
 #   3. The three Helm releases.
 #   4. The namespace, which takes anything left with it.
+#   5. The Keycloak namespace from Step 6.1, with the realm in it. A new
+#      Keycloak imports the realm afresh, so nothing is lost that the next
+#      build does not recreate.
 #
 # What it leaves unless told otherwise, and why:
 #
@@ -28,9 +30,6 @@
 #
 #   The cluster. `--cluster` deletes the kind cluster named by KIND_CLUSTER_NAME,
 #   default `kind`. Nothing else here touches the cluster itself.
-#
-#   Keycloak. It comes from Attachment A rather than the guide, and it is a
-#   container rather than anything in the cluster. `--keycloak` removes it.
 #
 #   Files the guide told you to write. `agentgateway-values.yaml` is worth
 #   keeping for upgrades, which is what Step 1 says, and `catalog.json` is worth
@@ -52,7 +51,6 @@ SESSION=$here/lib/session.sh
 dry_run=false
 approve=false
 do_crds=false
-do_keycloak=false
 do_cluster=false
 
 KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-kind}
@@ -71,11 +69,10 @@ while [ $# -gt 0 ]; do
     --dry-run)  dry_run=true ;;
     --approve)  approve=true ;;
     --crds)     do_crds=true ;;
-    --keycloak) do_keycloak=true ;;
     --cluster)  do_cluster=true ;;
-    --all)      do_crds=true; do_keycloak=true; do_cluster=true ;;
+    --all)      do_crds=true; do_cluster=true ;;
     -h|--help)
-      sed -n '3,43p' "$0" | cut -c 3-
+      sed -n '3,41p' "$0" | cut -c 3-
       exit 0
       ;;
     *) die "unknown option: $1" ;;
@@ -104,6 +101,8 @@ SESSION_DEFS_ONLY=1
 NS=${DOWN_NS:-$SESSION_FORWARD_NS}
 SESSION_FORWARD_NS=$NS
 SESSION_FORWARD_PATTERN="kubectl port-forward.*$NS"
+KEYCLOAK_NS=${DOWN_KEYCLOAK_NS:-$SESSION_KEYCLOAK_NS}
+SESSION_KEYCLOAK_NS=$KEYCLOAK_NS
 
 # --------------------------------------------------------------------------
 # Reporting
@@ -137,7 +136,7 @@ print_target() {
   printf '  context     %s%s%s\n' \
     "${SESSION_BOLD:-}" "$(session_kube_context || echo none)" "${SESSION_RESET:-}"
   printf '  apiserver   %s\n' "$(session_kube_apiserver || echo unknown)"
-  printf '  namespace   %s\n' "$NS"
+  printf '  namespaces  %s, %s\n' "$NS" "$KEYCLOAK_NS"
 }
 
 # --------------------------------------------------------------------------
@@ -155,20 +154,22 @@ teardown() {
   # --------------------------------------------------------------------------
 
   echo "port-forwards:"
-  n=$(pgrep -f "$SESSION_FORWARD_PATTERN" 2>/dev/null | wc -l | tr -d ' ')
-  [ -n "$n" ] || n=0
-  if [ "$n" -eq 0 ]; then
-    missing "port-forwards for $NS"
-  else
+  for fns in "$NS" "$KEYCLOAK_NS"; do
+    n=$(pgrep -f "kubectl port-forward.*$fns" 2>/dev/null | wc -l | tr -d ' ')
+    [ -n "$n" ] || n=0
+    if [ "$n" -eq 0 ]; then
+      missing "port-forwards for $fns"
+      continue
+    fi
     plural=s
     [ "$n" -eq 1 ] && plural=""
     if $dry_run; then
-      would "$n port-forward$plural for $NS"
+      would "$n port-forward$plural for $fns"
     else
-      session_kill_forwards 1 >/dev/null
-      gone "$n port-forward$plural for $NS"
+      pkill -f "kubectl port-forward.*$fns" 2>/dev/null || true
+      gone "$n port-forward$plural for $fns"
     fi
-  fi
+  done
   echo
 
   # --------------------------------------------------------------------------
@@ -274,7 +275,28 @@ teardown() {
   echo
 
   # --------------------------------------------------------------------------
-  # 5. CRDs, opt in
+  # 5. The Keycloak namespace, from Step 6.1
+  #
+  # After the gateway's, so nothing is left validating tokens against an IdP
+  # that has gone. Nothing in it carries a finalizer.
+  # --------------------------------------------------------------------------
+
+  echo "keycloak:"
+  if ! $cluster_up; then
+    missing "namespace $KEYCLOAK_NS (no cluster reachable)"
+  elif ! kubectl get namespace "$KEYCLOAK_NS" >/dev/null 2>&1; then
+    missing "namespace $KEYCLOAK_NS"
+  elif $dry_run; then
+    would "namespace $KEYCLOAK_NS, Keycloak and the realm in it"
+  elif kubectl delete namespace "$KEYCLOAK_NS" --ignore-not-found --timeout=180s >/dev/null 2>&1; then
+    gone "namespace $KEYCLOAK_NS"
+  else
+    problem "namespace $KEYCLOAK_NS" "still deleting after 180s. kubectl get all -n $KEYCLOAK_NS"
+  fi
+  echo
+
+  # --------------------------------------------------------------------------
+  # 6. CRDs, opt in
   # --------------------------------------------------------------------------
 
   if $do_crds; then
@@ -302,26 +324,6 @@ teardown() {
   else
     echo "CRDs:"
     kept "CRDs, which up.sh reinstalls. --crds removes them"
-    echo
-  fi
-
-  # --------------------------------------------------------------------------
-  # 6. Keycloak, opt in. Attachment A, not the guide.
-  # --------------------------------------------------------------------------
-
-  if $do_keycloak; then
-    echo "keycloak:"
-    if ! command -v docker >/dev/null 2>&1; then
-      missing "the keycloak container (no docker)"
-    elif [ -z "$(docker ps -aq --filter name=^keycloak$ 2>/dev/null)" ]; then
-      missing "the keycloak container"
-    elif $dry_run; then
-      would "the keycloak container, and the realm in it"
-    elif docker rm -f keycloak >/dev/null 2>&1; then
-      gone "the keycloak container"
-    else
-      problem "the keycloak container" "docker rm failed"
-    fi
     echo
   fi
 
