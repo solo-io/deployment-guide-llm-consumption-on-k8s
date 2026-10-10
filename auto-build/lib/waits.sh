@@ -105,6 +105,8 @@ policy-llm-model-aliases                            wait_policy_attached llm-mod
 backend-llm-failover-backend                        wait_backend_accepted llm-failover-backend && wait_route_accepted llm-failover
 policy-llm-failover-health                          wait_policy_attached llm-failover-health
 policy-llm-failover-health-2                        wait_policy_attached llm-failover-health
+policy-llm-failover-health-3                        wait_policy_attached llm-failover-health
+policy-llm-failover-health-4                        wait_policy_attached llm-failover-health
 policy-llm-failover-model-headers                   wait_policy_attached llm-failover-model-headers
 policy-llm-prompt-enrichment                        wait_policy_attached llm-prompt-enrichment
 policy-llm-token-ceiling                            wait_policy_attached llm-token-ceiling
