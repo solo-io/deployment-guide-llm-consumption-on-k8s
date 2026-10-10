@@ -446,6 +446,16 @@ session_ensure_port() {
     blocked)
       pids=$(session_port_forward_pids "$port")
       if [ -z "$pids" ]; then
+        # A forward whose pod was deleted can exit on the connection the probe
+        # just made, which leaves the port blocked a moment ago and free now.
+        # Seen with Keycloak after a rollout restart. Look again before calling
+        # it someone else's port.
+        sleep 1
+        if [ "$(session_port_state "$port" "$probe_path")" = free ] &&
+           session_start_forward "$port"; then
+          printf '  %-6s %s replaced, its forward had exited\n' "$port" "$label"
+          return 0
+        fi
         # Something is holding the port and it is not a forward for this
         # namespace. Killing it is not this script's business.
         printf '  %-6s %s IN USE by something that is not a forward for %s, left alone\n' \
