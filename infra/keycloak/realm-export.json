@@ -1,6 +1,7 @@
 {
     "realm": "llm-platform",
     "enabled": true,
+    "accessTokenLifespan": 3600,
     "roles": {
         "realm": [
             { "name": "llm-admin", "description": "Full LLM access, no rate limits" },

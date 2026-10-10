@@ -18,13 +18,13 @@ Seven scripts exist:
 
 ## What this builds, and what it does not
 
-The automation builds the reference path, and only that: Keycloak on kind, exactly as
+The automation builds the reference path, and only that: Keycloak in the cluster on kind, exactly as
 `deployment-guide-keycloak.md` describes it. Every wait, every assertion and every credential check
 here is keyed to that topology.
 
 Other identity providers, other cluster types and other LLM providers are covered by the guide and
-its attachments, and they are followed by hand. Attachment A stands up the reference Keycloak for a lab
-or PoC, Attachment B covers using your own IdP, Attachment C covers other LLM providers,
+its attachments, and they are followed by hand. Attachment A describes the reference Keycloak that
+Step 6.1 deploys, Attachment B covers using your own IdP, Attachment C covers other LLM providers,
 Attachment D covers collecting metrics and traces into a stack you already run, and Attachment E
 covers guardrail alternatives. None of those paths are scripted, and `verify.sh` does not assert
 against them.
@@ -115,7 +115,7 @@ step says returns 503 on every request. Set it, or tag that block `when=manual`.
 
 ./down.sh                        # remove what the guide created
 ./down.sh --dry-run              # say what would go, remove nothing
-./down.sh --all                  # also the CRDs, Keycloak and the kind cluster
+./down.sh --all                  # also the CRDs and the kind cluster
 ```
 
 `up.sh` runs `verify.sh` itself when the build succeeds, and its exit status says which half failed:
@@ -139,9 +139,10 @@ full of coloured circles is harder to read afterwards than words are. The circle
 than an emoji, because emoji are two cells wide in some terminals and one in others, which moves
 every column after them.
 
-`--from` re-runs a prelude first: the environment setup block, your credentials, and the blocks that
-define the `forwards`, `get_token` and `decode_jwt` helpers, because a block halfway through the
-guide expects them to exist. It does not re-run 12.2's traffic generator, which defines
+`--from` re-runs a prelude first: the environment setup block, your credentials, 6.1's Keycloak
+port-forward, and the blocks that define the `forwards`, `get_token` and `decode_jwt` helpers,
+because a block halfway through the guide expects them to exist. The forward is there because the
+token block calls `get_token` through it. It does not re-run 12.2's traffic generator, which defines
 `send_traffic` and then calls it five times against your provider.
 
 ---
@@ -154,16 +155,15 @@ resource, no port-forward, no credential written anywhere. It reads, and it asks
 
 | Check | Fails when |
 |---|---|
-| Tools | `kubectl`, `helm`, `jq`, `curl` or `docker` is not on PATH |
+| Tools | `kubectl`, `helm`, `jq` or `curl` is not on PATH |
 | Cluster | there is no current context, or the apiserver behind it does not answer `/healthz` with `ok` |
 | Credentials | one of the three does not resolve from the environment or `.env.local`, or is set in both to different values |
-| Keycloak | discovery does not answer, or a token for `dev` does not come back |
-| Ports | 8081, 15020 or 4000 is held by something that is not a forward, or by a forward that has stopped answering |
+| Ports | 8081, 15020, 4000 or the Keycloak port is held by something that is not a forward, or by a forward that has stopped answering |
 
 Every failure names the fix. A check that says something is wrong without saying what to do about it
 has moved the work, not done it.
 
-Two of them are deliberately stricter than the obvious version, because the obvious version passes
+One of them is deliberately stricter than the obvious version, because the obvious version passes
 while the thing it checks is broken:
 
 **A kubeconfig with a current context in it proves nothing.** The context can name a cluster that is
@@ -172,13 +172,15 @@ gone, and every `kubectl` in the build then fails one at a time, a hundred block
 with stdin closed, because a kubeconfig whose user has no credentials makes `kubectl` prompt for a
 username and then wait on stdin forever.
 
-**A well-known endpoint answers from a half-imported realm.** Keycloak serves discovery as soon as
-the realm exists, before its clients, users and mappers are there. So discovery answering is the
-first half and a token for `dev` coming back is the other. The fetch runs the guide's own
-`get_token`, which means what is checked is what the build will use.
+**Keycloak is not checked.** The guide deploys it in Step 6.1, so on a clean cluster there is
+nothing to check, and a precondition that fails on every clean cluster is not one. Its readiness
+probe is the realm's discovery document, so the guide's own `rollout status` waits for the realm.
+Whether a token comes back is a wait in `lib/waits.sh`, after the block that forwards Keycloak, and
+the first precondition `verify.sh` asserts. Keycloak imports the realm before it opens its listener,
+which was checked on 26.1.3, so a Ready pod does not serve a half-imported realm.
 
-Then it shows what it would build against — the context, its apiserver, the namespace, the guide,
-the Keycloak URL and realm, and each credential's source and length, never its value — and asks.
+Then it shows what it would build against: the context, its apiserver, the namespace, the guide,
+the Keycloak realm, and each credential's source and length, never its value. Then it asks.
 It asks only when stdin is a terminal and `--approve` was not passed: a pipeline has nobody to ask,
 and waiting for an answer that cannot come is how a script hangs in CI. Enter proceeds, anything
 else aborts.
@@ -236,19 +238,17 @@ path gets exercised without breaking anything.
 ## Tearing it down
 
 `down.sh` removes the port-forwards, the resources the guide created in the namespace, the three Helm
-releases, and then the namespace. In that order: the custom resources go while their controller is
+releases, the namespace, and then the Keycloak namespace from Step 6.1. In that order: the custom resources go while their controller is
 still running, because a resource with a finalizer on it outlives the controller that would clear it,
 and a namespace deleted first can sit in `Terminating` with nothing left to process it.
 
-It leaves three things alone unless told:
+It leaves two things alone unless told:
 
 **The CRDs.** Deleting a CRD deletes every resource of that kind in the cluster, including ones this
 guide never created. `--crds` removes them. `up.sh` reinstalls them, so leaving them costs a rebuild
 nothing.
 
 **The cluster.** `--cluster` deletes the kind cluster named by `KIND_CLUSTER_NAME`, default `kind`.
-
-**Keycloak.** It comes from Attachment A rather than the guide. `--keycloak` removes the container.
 
 It also leaves `agentgateway-values.yaml` and `catalog.json` on disk and says so. Step 1 tells you to
 keep the values file for upgrades, and a catalog you generated is worth keeping too.
@@ -281,10 +281,13 @@ because replacing one that works costs whatever was in flight and proves
 nothing. A port that is listening and not answering is the case that matters:
 that is a forward whose pod was replaced, still holding the local port with
 nothing at the far end, so it is killed and a new one started. A free port just
-gets one. It says which of the three happened for each of 8081, 15020 and 4000.
+gets one. It says which of the three happened for each of 8081, 15020, 4000 and
+the Keycloak port, `KEYCLOAK_LOCAL_PORT`, default 8080. Before Step 6.1 has run,
+it says Keycloak is not deployed rather than starting a forward that cannot work.
 
-If a port is held by something that is not a forward for this namespace, it says
-so and leaves it alone rather than guessing.
+If a port is held by something that is not a forward for that port's namespace,
+it says so and leaves it alone rather than guessing. The Keycloak forward lives
+in `keycloak`, the other three in `agentgateway-system`.
 
 Sourcing it again is safe and is the fastest way back after a rollout has taken
 your forwards down.

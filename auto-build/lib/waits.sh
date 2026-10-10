@@ -76,6 +76,14 @@ backend-anthropic-claude-sonnet-backend             wait_backend_accepted anthro
 route-anthropic-claude-sonnet                       wait_route_accepted anthropic-claude-sonnet
 
 # --- Secure
+#
+# The guide's forward block waits for the rollout itself, and the readiness
+# probe is the realm's discovery document, so Ready already means the realm is
+# served. What it does not prove is that a token comes back: a client or user
+# missing from the realm, or a forward that died, still passes a rollout. Step
+# 6.2 fetches tokens in its first block, and a null token there turns every
+# later 200 and 403 into a 401 that reads as a policy fault.
+6-1-deploy-the-reference-identity-provider-forward  wait_port "$KEYCLOAK_LOCAL_PORT" && wait_keycloak_token
 backend-keycloak                                    wait_backend_accepted keycloak
 policy-llm-jwt-auth                                 wait_policy_attached llm-jwt-auth
 policy-llm-authz                                    wait_policy_attached llm-authz
@@ -345,6 +353,24 @@ _port_answers() {
   code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 \
     "http://localhost:${1}/" 2>/dev/null) || return 1
   [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+# A password-grant token for dev, through the forward. Not the guide's
+# get_token: that is defined in 6.2, after the block this waits on. The
+# request is the same one, built from the same environment variables.
+wait_keycloak_token() {
+  _poll "a token for dev from realm ${KEYCLOAK_REALM:-unset} on localhost:${KEYCLOAK_LOCAL_PORT:-unset}" \
+    "$WAITS_TIMEOUT" "_keycloak_token_issued"
+}
+
+_keycloak_token_issued() {
+  curl -sS --max-time 5 -X POST \
+    "http://localhost:${KEYCLOAK_LOCAL_PORT}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token" \
+    -d grant_type=password \
+    -d "client_id=${KEYCLOAK_CLIENT_ID}" \
+    -d "client_secret=${KEYCLOAK_CLIENT_SECRET}" \
+    -d username=dev -d password=dev-password \
+    | jq -er '.access_token | select(split(".") | length == 3)' >/dev/null
 }
 
 wait_port() {

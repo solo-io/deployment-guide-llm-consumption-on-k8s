@@ -8,7 +8,7 @@
 #
 # It evaluates the guide's environment setup block and its helper-function
 # blocks into your shell, applies your credentials over the placeholders that
-# block sets, and makes sure the three port-forwards are up. After it, the
+# block sets, and makes sure the four port-forwards are up. After it, the
 # guide's commands work when pasted, `get_token dev` returns a token, and
 # `curl http://localhost:8081/llm` reaches the gateway.
 #
@@ -24,8 +24,8 @@
 #   session_helpers            evaluate the blocks that define forwards(),
 #                              get_token() and decode_jwt()
 #   session_apply_credentials  your values over the guide's placeholders
-#   session_forwards           ensure 8081, 15020 and 4000
-#   session_kill_forwards <fd> close every forward for the namespace
+#   session_forwards           ensure 8081, 15020, 4000 and the Keycloak port
+#   session_kill_forwards <fd> close every forward for both namespaces
 #   session_port_state <port> <path>
 #                              prints free, answering, or blocked
 #
@@ -74,6 +74,16 @@ SESSION_CREDENTIALS="AGENTGATEWAY_LICENSE_KEY ANTHROPIC_API_KEY OPENAI_API_KEY"
 SESSION_FORWARD_NS=agentgateway-system
 SESSION_FORWARD_PATTERN="kubectl port-forward.*$SESSION_FORWARD_NS"
 
+# Keycloak runs in its own namespace, from Step 6.1, and its forward is the
+# guide's own: `kubectl port-forward svc/keycloak -n keycloak 8080:8080`. The
+# token's iss claim says the in-cluster Service URL; this is where a laptop
+# reaches it, so it is deliberately not derived from KEYCLOAK_URL. The port
+# follows the guide's KEYCLOAK_LOCAL_PORT, so a machine where 8080 is taken
+# moves both together.
+SESSION_KEYCLOAK_NS=${SESSION_KEYCLOAK_NS:-keycloak}
+SESSION_KEYCLOAK_PORT=${SESSION_KEYCLOAK_PORT:-${KEYCLOAK_LOCAL_PORT:-8080}}
+SESSION_KEYCLOAK_FORWARD_PATTERN="kubectl port-forward.*$SESSION_KEYCLOAK_NS"
+
 # --------------------------------------------------------------------------
 # Colour and status glyphs
 #
@@ -120,7 +130,7 @@ else
 fi
 
 # Local ports the guide uses, and how long to wait for a new forward to answer.
-SESSION_PORTS=${SESSION_PORTS:-"8081 15020 4000"}
+SESSION_PORTS=${SESSION_PORTS:-"8081 15020 4000 $SESSION_KEYCLOAK_PORT"}
 SESSION_FORWARD_TIMEOUT=${SESSION_FORWARD_TIMEOUT:-15}
 
 # --------------------------------------------------------------------------
@@ -231,8 +241,8 @@ session_helpers() {
   # succeeds and every later request is a 401 that looks like a policy problem.
   case ${ALLOWED_TOKEN:-} in
     ''|null)
-      printf 'helpers:      ALLOWED_TOKEN is %s. Is Keycloak up and reachable at %s?\n' \
-        "${ALLOWED_TOKEN:-empty}" "${KEYCLOAK_URL:-unset}"
+      printf 'helpers:      ALLOWED_TOKEN is %s. Is Keycloak deployed and forwarded on localhost:%s?\n' \
+        "${ALLOWED_TOKEN:-empty}" "$SESSION_KEYCLOAK_PORT"
       rc=1
       ;;
   esac
@@ -337,6 +347,7 @@ session_apply_credentials() {
 
 session_port_target() {
   case ${1:-} in
+    "$SESSION_KEYCLOAK_PORT") printf 'service/keycloak 8080' ;;
     8081)  printf 'deployment/agentgateway-proxy 80' ;;
     15020) printf 'deployment/agentgateway-proxy 15020' ;;
     4000)  printf 'service/solo-enterprise-ui 80' ;;
@@ -349,6 +360,7 @@ session_port_target() {
 # tunnel as well as a 200 does.
 session_port_path() {
   case ${1:-} in
+    "$SESSION_KEYCLOAK_PORT") printf '/realms/%s/.well-known/openid-configuration' "${KEYCLOAK_REALM:-llm-platform}" ;;
     8081)  printf '/' ;;
     15020) printf '/metrics' ;;
     4000)  printf '/age/' ;;
@@ -358,6 +370,7 @@ session_port_path() {
 
 session_port_label() {
   case ${1:-} in
+    "$SESSION_KEYCLOAK_PORT") printf 'idp    ' ;;
     8081)  printf 'gateway' ;;
     15020) printf 'metrics' ;;
     4000)  printf 'ui     ' ;;
@@ -392,10 +405,19 @@ session_port_state() {
   fi
 }
 
+# Which namespace each port's target lives in. Three of the four are the
+# gateway's; the identity provider has its own.
+session_port_ns() {
+  case ${1:-} in
+    "$SESSION_KEYCLOAK_PORT") printf '%s' "$SESSION_KEYCLOAK_NS" ;;
+    *)                        printf '%s' "$SESSION_FORWARD_NS" ;;
+  esac
+}
+
 # The forwards for one local port, rather than for the namespace. The guide
 # writes the mapping after the namespace, as `-n agentgateway-system 8081:80`.
 session_port_forward_pids() {
-  pgrep -f "kubectl port-forward.*$SESSION_FORWARD_NS.*[[:space:]]${1:-}:" 2>/dev/null
+  pgrep -f "kubectl port-forward.*$(session_port_ns "${1:-}").*[[:space:]]${1:-}:" 2>/dev/null
 }
 
 session_start_forward() {
@@ -404,7 +426,7 @@ session_start_forward() {
   target=${spec%% *}
   remote=${spec##* }
 
-  kubectl port-forward "$target" -n "$SESSION_FORWARD_NS" "${port}:${remote}" \
+  kubectl port-forward "$target" -n "$(session_port_ns "$port")" "${port}:${remote}" \
     >/dev/null 2>&1 &
 
   local waited=0 probe_path
@@ -434,6 +456,13 @@ session_ensure_port() {
       ;;
 
     free)
+      # Before Step 6.1 there is no Keycloak to forward to. Saying so is more
+      # use than a forward that fails to start for a reason it cannot name.
+      if [ "$port" = "$SESSION_KEYCLOAK_PORT" ] &&
+         ! kubectl get service keycloak -n "$SESSION_KEYCLOAK_NS" >/dev/null 2>&1; then
+        printf '  %-6s %s not deployed, Step 6.1 creates it\n' "$port" "$label"
+        return 1
+      fi
       if session_start_forward "$port"; then
         printf '  %-6s %s started\n' "$port" "$label"
         return 0
@@ -459,7 +488,7 @@ session_ensure_port() {
         # Something is holding the port and it is not a forward for this
         # namespace. Killing it is not this script's business.
         printf '  %-6s %s IN USE by something that is not a forward for %s, left alone\n' \
-          "$port" "$label" "$SESSION_FORWARD_NS"
+          "$port" "$label" "$(session_port_ns "$port")"
         return 1
       fi
 
@@ -502,20 +531,23 @@ session_forwards() {
 # leftover forward is both why the next run fails to bind and why it would read
 # nothing if it did.
 session_kill_forwards() {
-  local fd=${1:-1} n
+  local fd=${1:-1} pattern ns n
 
-  n=$(pgrep -f "$SESSION_FORWARD_PATTERN" 2>/dev/null | wc -l | tr -d ' ')
-  [ -n "$n" ] || n=0
+  for ns in "$SESSION_FORWARD_NS" "$SESSION_KEYCLOAK_NS"; do
+    pattern="kubectl port-forward.*$ns"
+    n=$(pgrep -f "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+    [ -n "$n" ] || n=0
 
-  if [ "$n" -eq 0 ]; then
-    printf 'port-forwards: none left over for %s\n' "$SESSION_FORWARD_NS" >&"$fd"
-    return 0
-  fi
+    if [ "$n" -eq 0 ]; then
+      printf 'port-forwards: none left over for %s\n' "$ns" >&"$fd"
+      continue
+    fi
 
-  pkill -f "$SESSION_FORWARD_PATTERN" 2>/dev/null || true
-  # Long enough for the local ports to be released before anything binds them.
-  sleep 1
-  printf 'port-forwards: closed %s left over for %s\n' "$n" "$SESSION_FORWARD_NS" >&"$fd"
+    pkill -f "$pattern" 2>/dev/null || true
+    # Long enough for the local ports to be released before anything binds them.
+    sleep 1
+    printf 'port-forwards: closed %s left over for %s\n' "$n" "$ns" >&"$fd"
+  done
 }
 
 # --------------------------------------------------------------------------
@@ -534,8 +566,10 @@ session_up() {
 
   session_env || return 1
   session_apply_credentials || return $?
-  session_helpers || rc=1
+  # Forwards before helpers: the token helper block fetches through the
+  # Keycloak forward, and calls it.
   session_forwards || rc=1
+  session_helpers || rc=1
 
   echo
   if [ "$rc" -eq 0 ]; then

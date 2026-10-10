@@ -171,7 +171,7 @@ printf '  proxy deployment present in %s\n' "$NS"
 # into a 401, so it is settled before anything is asserted rather than after.
 probe_token=$(get_token dev 2>/dev/null)
 case $probe_token in
-  ''|null) die "get_token dev returned '${probe_token:-empty}'. Is Keycloak up at ${KEYCLOAK_URL:-unset}?" ;;
+  ''|null) die "get_token dev returned '${probe_token:-empty}'. Is Keycloak deployed in ${SESSION_KEYCLOAK_NS} and forwarded on localhost:${SESSION_KEYCLOAK_PORT}?" ;;
   *.*.*)   printf '  get_token returns a three part token\n' ;;
   *)       die "get_token dev did not return a JWT: ${probe_token:0:40}" ;;
 esac
