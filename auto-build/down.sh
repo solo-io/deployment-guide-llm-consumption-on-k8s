@@ -239,22 +239,18 @@ teardown() {
   else
     installed=$(helm list -n "$NS" -q 2>/dev/null)
     for release in $(printf '%s' "$RELEASES"); do
-      case "
-  $installed
-  " in
-        *"
-  $release
-  "*)
-          if $dry_run; then
-            would "helm release $release"
-          elif helm uninstall "$release" -n "$NS" --wait --timeout 3m >/dev/null 2>&1; then
-            gone "helm release $release"
-          else
-            problem "helm release $release" "uninstall failed"
-          fi
-          ;;
-        *) missing "helm release $release" ;;
-      esac
+      # A whole-line match. A case pattern built from newline-delimited strings
+      # broke silently when it was indented: it then matched nothing, and every
+      # release was reported absent and left installed.
+      if ! printf '%s\n' "$installed" | grep -qx "$release"; then
+        missing "helm release $release"
+      elif $dry_run; then
+        would "helm release $release"
+      elif helm uninstall "$release" -n "$NS" --wait --timeout 3m >/dev/null 2>&1; then
+        gone "helm release $release"
+      else
+        problem "helm release $release" "uninstall failed"
+      fi
     done
   fi
   echo
