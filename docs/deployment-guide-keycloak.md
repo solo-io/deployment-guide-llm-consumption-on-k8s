@@ -2943,7 +2943,7 @@ EOF
 
 | **Setting** | **What it does** |
 |---|---|
-| `unhealthyCondition` | A CEL expression over the response. `true` counts the response as unhealthy. Omit it and 5xx responses still lower the health score for load balancing, but nothing is ever evicted. |
+| `unhealthyCondition` | A CEL expression over the response. `true` counts the response as unhealthy. Omit it and 5xx responses still lower the health score for load balancing. A provider that cannot be resolved is evicted either way, as 16.5 shows. |
 | `eviction.duration` | How long an evicted provider stays out. Default `3s`, with multiplicative backoff on repeat evictions. A 429 carrying `Retry-After` uses that value instead. |
 | `eviction.consecutiveFailures` | How many unhealthy responses in a row before eviction. Use `3` in production so one transient error does not evict a healthy provider; `1` for testing. |
 
@@ -3004,11 +3004,56 @@ Verified output on v2026.7.1:
 
 Note request 3 returning to the primary well inside the 30 second eviction duration. With every response counting as unhealthy, both tiers get evicted, and rather than failing the request the gateway serves it anyway. Eviction never takes your service down, which is consistent with the fail-open posture elsewhere in this product, and it means a `"true"` condition demonstrates rotation rather than a clean one-way progression.
 
-Also note eviction fired on a **200** response. `unhealthyCondition` is evaluated on whatever comes back, and it is your expression that decides what unhealthy means, not the status code.
+Also note eviction fired on a **200** response. Your `unhealthyCondition` decides whether a response counts as unhealthy, which is what evicts on a 200 here. It is not the only thing that does: 16.5 shows eviction with no `unhealthyCondition` set.
+
+**Eviction routes around a failure only while there is something left to route to.** Above, both tiers are evicted and the gateway serves the primary anyway. In 16.5 only the primary is evicted, the fallback stays healthy, and every request after the first goes to the fallback with no rotation back. The rule from the two runs together: while any backend is healthy, eviction routes traffic around the evicted one; when none are, eviction is ignored and the request is served regardless. The published load balancing guide shows one-way progression only because its example has three tiers and sends three requests, so it never reaches the state where all of them are evicted.
 
 #### 16.5 What failover does and does not protect you from
 
-Verified on v2026.7.1, by pointing the primary at a hostname that does not resolve and sending four requests with `unhealthyCondition: "response.code >= 500"` and `consecutiveFailures: 1`:
+Verified on v2026.7.1. First a health policy that evicts on the first server error, the 16.3 resource with a narrower condition:
+
+```bash run id=policy-llm-failover-health-3
+kubectl apply -f- <<EOF
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: llm-failover-health
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: enterpriseagentgateway.solo.io
+      kind: EnterpriseAgentgatewayBackend
+      name: llm-failover-backend
+  backend:
+    health:
+      unhealthyCondition: "response.code >= 500"
+      eviction:
+        duration: 30s
+        consecutiveFailures: 1
+EOF
+```
+
+Then point the primary at a hostname that does not resolve. `host` and `port` are per provider entry, siblings of the `anthropic` block rather than backend-wide, so this moves `primary-sonnet` alone and leaves `fallback-haiku` on the default Anthropic host. They must be set together, which is the validation 16.3 notes:
+
+```bash run id=backend-llm-failover-backend-unresolvable
+kubectl patch enterpriseagentgatewaybackend llm-failover-backend -n agentgateway-system --type json \
+  -p '[{"op":"add","path":"/spec/ai/groups/0/providers/0/host","value":"unresolvable.invalid"},
+       {"op":"add","path":"/spec/ai/groups/0/providers/0/port","value":443}]'
+
+export ALLOWED_TOKEN=$(get_token dev)
+: "${ALLOWED_TOKEN:?token is empty — is auto-build/lib/session.sh sourced?}"
+
+for i in 1 2 3 4; do
+  code=$(curl -s -o /tmp/llm-failover-resp.json -w '%{http_code}' http://localhost:8081/llm-failover \
+    -H "Authorization: Bearer ${ALLOWED_TOKEN}" -H "Content-Type: application/json" \
+    -d '{"messages":[{"role":"user","content":"Say hello in one word."}]}')
+  echo "req $i: ${code}  model=$(jq -r '.model // empty' /tmp/llm-failover-resp.json 2>/dev/null)"
+done
+```
+
+The guard after the export is there because a missing `get_token` leaves `ALLOWED_TOKEN` empty, and the loop then prints four 401s that look like a result.
+
+Verified output on v2026.7.1:
 
 ```text
 req 1: 503  model=
@@ -3017,21 +3062,61 @@ req 3: 200  model=claude-haiku-4-5-20251001
 req 4: 200  model=claude-haiku-4-5-20251001
 ```
 
-Three things to take from that.
+Then put the primary back. Both fields go in one patch, because an entry carrying one and not the other is rejected:
 
-**Transport-level failures do trigger eviction.** A DNS failure has no upstream response for a CEL expression to evaluate, yet eviction still fired, which suggests the gateway evaluates the 503 it synthesises for the caller. So a provider that is unreachable, not just one returning errors, does get evicted.
+```bash run id=backend-llm-failover-backend-restore
+kubectl patch enterpriseagentgatewaybackend llm-failover-backend -n agentgateway-system --type json \
+  -p '[{"op":"remove","path":"/spec/ai/groups/0/providers/0/port"},
+       {"op":"remove","path":"/spec/ai/groups/0/providers/0/host"}]'
+```
+
+Then restore the policy from 16.3. `consecutiveFailures: 1` evicts a healthy provider on a single transient error:
+
+```bash run id=policy-llm-failover-health-4
+kubectl apply -f- <<EOF
+apiVersion: enterpriseagentgateway.solo.io/v1alpha1
+kind: EnterpriseAgentgatewayPolicy
+metadata:
+  name: llm-failover-health
+  namespace: agentgateway-system
+spec:
+  targetRefs:
+    - group: enterpriseagentgateway.solo.io
+      kind: EnterpriseAgentgatewayBackend
+      name: llm-failover-backend
+  backend:
+    health:
+      unhealthyCondition: "response.code >= 500 || response.code == 429"
+      eviction:
+        duration: 10s
+        consecutiveFailures: 3
+EOF
+```
+
+Four things to take from that.
+
+**Request 1 was lost.** Failover is not a per-request retry. Eviction is evaluated on the outcome of a request, so the first failure is spent proving the tier is unhealthy, and with `consecutiveFailures: n` you lose n requests before the tier is evicted. Those callers see the error. The same test with `consecutiveFailures: 3`, verified on v2026.7.1:
+
+```text
+req 1: 503  model=
+req 2: 503  model=
+req 3: 503  model=
+req 4: 200  model=claude-haiku-4-5-20251001
+req 5: 200  model=claude-haiku-4-5-20251001
+req 6: 200  model=claude-haiku-4-5-20251001
+```
+
+> [!WARNING]
+> **There is no retry. Tell your application teams.** The gateway will not reissue the failed request, so **tell your application teams to retry on 5xx**: a single retry converts every one of those failures into a success served by the fallback. And **set** `consecutiveFailures` **deliberately**. `3` avoids evicting a healthy provider over one blip, and the price is three failed requests when an outage is real.
+
+**Eviction here does not depend on your expression.** With the same `eviction` block and no `unhealthyCondition` at all, the test gives the same four lines: request 1 fails and requests 2 to 4 go to the fallback. A DNS resolution failure is classified unhealthy by a built-in default, so narrowing the condition does not turn eviction off for a provider that cannot be resolved. Remove the health policy entirely and nothing is evicted: all four requests return 503. Connection refused and timeouts were not tested.
 
 > [!WARNING]
 > **A documentation contradiction you may run into.** The load balancing guide carries a "Known limitations" warning stating that eviction only triggers on 429 responses with rate-limit headers, and explicitly not on 503, connection refused, timeouts or DNS failures. That did not match observed behaviour on v2026.7.1: eviction fired on a DNS failure, and separately on a 200 when `unhealthyCondition` was set to `"true"`. Treat the warning as out of date, and test your own case rather than trusting either page.
 
-**Recovery is immediate.** Once the primary was healthy again, the very next request used it. No manual intervention, no waiting out the eviction duration.
+**`model=` is empty on the failed request.** A request that never reaches a provider carries no model attribution, so there is nothing for the catalog in Step 11 to price and nothing for the per-model, per-user and per-group views in Step 12 to attribute it to. A provider outage shows up there as spend falling, with no record of why.
 
-> [!WARNING]
-> **There is no retry. Tell your application teams.** The request that discovers the failure **fails**. It returned 503 to the caller, and only subsequent requests were protected. Failover is not a safety net for the request that finds the problem.
->
-> So a provider outage costs you at least one failed request per eviction window, and with `consecutiveFailures: 3` in a production policy it costs at least three. If your callers do not retry, that is three users seeing an error before protection engages.
->
-> Two practical consequences. **Set** `consecutiveFailures` **deliberately**: `3` avoids evicting a healthy provider over one blip, and the price is three failed requests when an outage is real. And **tell your application teams to retry on 5xx**, because the gateway will not do it for them. A single retry converts every one of those failures into a success served by the fallback.
+**Recovery is immediate.** Once the primary was healthy again, the very next request used it. No manual intervention, no waiting out the eviction duration.
 
 **What failover buys you:** it moves traffic off a degraded or unreachable provider within `consecutiveFailures` requests, keeps it off for the eviction duration, and returns automatically when the provider recovers. It does not make the failing requests succeed.
 
